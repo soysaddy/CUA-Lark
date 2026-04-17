@@ -10,8 +10,6 @@
 - 动作执行：`execution/`
 - 护栏与恢复：`agent/guardrail.py`、`execution/recovery.py`
 
-仓库里仍保留了 `core/`、`scenes/` 下的 FSM / 模板代码，但当前 `main.py` 和 `demo.py` 默认走的是 `VisionDecisionLoop`。
-
 ## 当前能力
 
 - 自然语言下发飞书桌面端任务
@@ -83,7 +81,6 @@ export OPENAI_API_KEY="你的 key"
 export OPENAI_BASE_URL="https://你的中转站/v1"
 export OPENAI_MODEL="gpt-4o"
 export OPENAI_PLANNER_MODEL="gpt-4o"
-export OPENAI_ROUTER_MODEL="gpt-4o-mini"
 ```
 
 说明：
@@ -228,7 +225,6 @@ CLI 结束时会输出执行状态；详细轨迹可以直接查看 `runs/`。
 - 全屏截图使用 macOS `screencapture`
 - 飞书窗口截图优先使用窗口级截图 `screencapture -l <window_id>`
 - 截图后会做 Retina 尺寸修正
-- 默认会做截图脱敏 `sanitize_image`
 
 注意：
 
@@ -300,12 +296,6 @@ CLI 结束时会输出执行状态；详细轨迹可以直接查看 `runs/`。
 PYTHONPYCACHEPREFIX=/tmp/cua-lark-pyc python3 -m py_compile $(rg --files -g '*.py')
 ```
 
-运行测试：
-
-```bash
-python3 -m pytest -q
-```
-
 ## 目录说明
 
 - `main.py`：CLI 入口
@@ -314,11 +304,9 @@ python3 -m pytest -q
 - `agent/`：当前主执行链，包含规划、感知融合、护栏和视觉循环
 - `perception/`：AX、截图、SoM、视觉识别
 - `execution/`：动作执行、输入、恢复
-- `verification/`：规则校验、视觉校验、报告
-- `utils/`：窗口管理、OpenAI 客户端、隐私处理、坐标工具
-- `core/`、`scenes/`：保留的 FSM / 模板实现
+- `verification/`：状态迁移验证
+- `utils/`：窗口管理、OpenAI 客户端、坐标工具
 - `runs/`：运行产物
-- `tests/`：测试
 
 ## 当前限制
 

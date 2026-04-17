@@ -10,7 +10,6 @@ from PIL import Image
 from loguru import logger
 
 from config import config
-from utils.privacy import sanitize_image
 from utils.window_manager import WindowManager
 
 
@@ -36,9 +35,6 @@ class ScreenCapturer:
                     f"Retina 缩放: {raw_size} → {image.size} "
                     f"(逻辑窗口 {logical_w}×{logical_h})"
                 )
-
-        if config.sanitize_screenshots:
-            image = sanitize_image(image)
 
         if image.width > config.screenshot_max_width:
             ratio = config.screenshot_max_width / image.width

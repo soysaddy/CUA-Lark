@@ -190,12 +190,14 @@ class VisionDecisionLoop:
         for step_num in range(1, config.max_total_steps + 1):
             plan_hint = ""
             plan_step = None
+            plan_context = self._build_plan_context_text(plan, None)
             if current_plan_step < len(plan_steps):
                 plan_step = plan_steps[current_plan_step]
                 plan_hint = (
                     f"当前计划步骤 [{plan_step.get('id', current_plan_step + 1)}"
                     f"/{len(plan_steps)}]: {plan_step.get('description', '')}"
                 )
+                plan_context = self._build_plan_context_text(plan, plan_step)
 
             # ── 感知 ──
             if self.next_capture_cache:
@@ -222,6 +224,7 @@ class VisionDecisionLoop:
                 perception=perception,
                 task_goal=result.goal,
                 plan_hint=plan_hint,
+                plan_context=plan_context,
                 step_num=step_num,
             )
             decision = self._stabilize_aggressive_retry(decision)
@@ -320,6 +323,7 @@ class VisionDecisionLoop:
                                 f"当前计划步骤 [{plan_step.get('id', current_plan_step + 1)}"
                                 f"/{len(plan_steps)}]: {plan_step.get('description', '')}"
                             )
+                            plan_context = self._build_plan_context_text(plan, plan_step)
                 else:
                     handoff_reason = handoff_resolution.get(
                         "reason",
@@ -362,11 +366,15 @@ class VisionDecisionLoop:
                 target_description=decision.get("target_description", ""),
                 perception=perception,
             )
+            fallback_step_key = enhanced_action.get("_planner_fallback_step_key")
+            if fallback_step_key is not None:
+                fallback_used_steps.add(fallback_step_key)
 
             step_started = time.time()
             preflight_verify = self._build_click_preflight_result(
                 enhanced_action,
                 decision.get("target_description", ""),
+                original_action=action,
             )
             exec_success = False
             post_action_perception = None
@@ -410,6 +418,19 @@ class VisionDecisionLoop:
                 self._update_transition_counters(verify_result)
             verify_result["exec_success"] = exec_success
             verify_result["perception_diag"] = perception_diag
+            if enhanced_action.get("_planner_fallback_consumed"):
+                verify_result["planner_fallback_consumed"] = True
+                verify_result["fallback_source"] = "execution"
+            elif (
+                str(plan.get("fallback_path", "") or "").find("搜索") >= 0
+                and plan_step
+                and plan_step.get("type") in {"search_open", "search_select"}
+            ):
+                verify_result["planner_fallback_consumed"] = True
+                verify_result["fallback_source"] = "model_or_plan"
+            else:
+                verify_result["planner_fallback_consumed"] = False
+                verify_result["fallback_source"] = "none"
 
             record = StepRecord(
                 step_num=step_num,
@@ -524,6 +545,7 @@ class VisionDecisionLoop:
         perception: FusedPerception,
         task_goal: str,
         plan_hint: str,
+        plan_context: str,
         step_num: int,
     ) -> dict:
         if not self.client:
@@ -542,6 +564,7 @@ class VisionDecisionLoop:
 
             context_parts = [
                 f"## 当前任务\n目标: {task_goal}\n{plan_hint}\n当前第 {step_num} 步",
+                f"\n## 规划上下文\n{plan_context}",
                 f"\n## 截图尺寸\n宽={img_w}px 高={img_h}px\n"
                 f"coordinate 的 x 范围 [0, {img_w}], y 范围 [0, {img_h}]",
             ]
@@ -728,6 +751,28 @@ class VisionDecisionLoop:
             ),
         }
 
+    @staticmethod
+    def _build_plan_context_text(plan: dict, plan_step: Optional[dict]) -> str:
+        parts = []
+        if plan.get("preferred_path"):
+            parts.append(f"preferred_path={plan.get('preferred_path')}")
+        if plan.get("fallback_path"):
+            parts.append(f"fallback_path={plan.get('fallback_path')}")
+        if plan.get("expected_transition"):
+            expected = plan.get("expected_transition")
+            if isinstance(expected, dict):
+                expected = json.dumps(expected, ensure_ascii=False)
+            parts.append(f"expected_transition={expected}")
+        if plan_step:
+            if plan_step.get("type"):
+                parts.append(f"current_step_type={plan_step.get('type')}")
+            if plan_step.get("success_signal"):
+                signal = plan_step.get("success_signal")
+                if isinstance(signal, dict):
+                    signal = json.dumps(signal, ensure_ascii=False)
+                parts.append(f"current_step_target={signal}")
+        return "\n".join(parts) or "无额外规划上下文"
+
     def _resolve_internal_handoff(
         self,
         decision: dict,
@@ -745,6 +790,12 @@ class VisionDecisionLoop:
         step_key = current_plan_step if current_plan_step < len(plan_steps) else -1
         attempts = issue_counts.get(step_key, 0)
         issue_counts[step_key] = attempts + 1
+        fallback_text = str(plan.get("fallback_path", "") or "")
+        fallback_available = "搜索" in fallback_text or any(
+            step.get("type") == "search_open"
+            for step in plan_steps[current_plan_step:]
+        )
+        fallback_attempted = step_key in fallback_used_steps
 
         if attempts == 0:
             return {
@@ -755,24 +806,31 @@ class VisionDecisionLoop:
                 ],
             }
 
-        fallback_resolution = self._build_search_fallback_decision(
-            plan=plan,
-            plan_steps=plan_steps,
-            current_plan_step=current_plan_step,
-            decision=decision,
-            plan_hint=plan_hint,
-            fallback_used_steps=fallback_used_steps,
-        )
-        if fallback_resolution:
-            return {
-                "mode": "fallback",
-                **fallback_resolution,
-            }
+        if fallback_available and not fallback_attempted:
+            fallback_resolution = self._build_search_fallback_decision(
+                plan=plan,
+                plan_steps=plan_steps,
+                current_plan_step=current_plan_step,
+                decision=decision,
+                plan_hint=plan_hint,
+                fallback_used_steps=fallback_used_steps,
+            )
+            if fallback_resolution:
+                return {
+                    "mode": "fallback",
+                    **fallback_resolution,
+                }
 
         if perception_diag.get("size_assessment") == "too_small":
-            reason = "当前窗口尺寸异常，已重试和 fallback 仍无法确认目标"
+            if fallback_available:
+                reason = "当前窗口尺寸异常，已重试且已尝试可用 fallback 仍无法确认目标"
+            else:
+                reason = "当前窗口尺寸异常，已重试但无可用 fallback，仍无法确认目标"
         else:
-            reason = "已重试和 fallback 仍无法确认目标，当前更适合由用户接管"
+            if fallback_available:
+                reason = "已重试且已尝试可用 fallback 仍无法确认目标，当前更适合由用户接管"
+            else:
+                reason = "已重试但无可用 fallback，仍无法确认目标，当前更适合由用户接管"
         return {"mode": "handoff", "reason": reason}
 
     @staticmethod
@@ -816,7 +874,6 @@ class VisionDecisionLoop:
         if search_index is None and "搜索" not in fallback_text:
             return None
 
-        fallback_used_steps.add(step_key)
         guarded = dict(decision)
         guarded["thinking"] = (
             f"{decision.get('thinking', '')} 当前感知不稳定，先消费 planner 的搜索 fallback。"
@@ -825,6 +882,9 @@ class VisionDecisionLoop:
             "type": "hotkey",
             "keys": ["command", "k"],
             "reason": "入口识别不清，优先转搜索链路而不是直接失败",
+            "_planner_fallback_consumed": True,
+            "_planner_fallback_step_key": step_key,
+            "_fallback_source": "execution",
         }
         guarded["target_description"] = "全局搜索"
         guarded["confidence"] = "medium"
@@ -912,11 +972,34 @@ class VisionDecisionLoop:
         self,
         action: dict,
         target_description: str,
+        original_action: Optional[dict] = None,
     ) -> Optional[dict]:
         if action.get("type") not in {"click", "double_click", "right_click"}:
             return None
         if any((action.get("ax_ref"), action.get("ax_coordinate"), action.get("coordinate"))):
             return None
+
+        failure_reason = "click 缺少可执行坐标，已跳过无效点击"
+        failure_source = "unknown"
+        coordinate_source = str(action.get("coordinate_source", "") or "")
+        original_coordinate = bool((original_action or {}).get("coordinate"))
+
+        if action.get("_retry_coordinate_reset"):
+            failure_source = "retry_coordinate_cleared"
+            failure_reason = "retry 时已主动移除旧坐标，但本轮未重新定位成功"
+        elif not original_coordinate:
+            if coordinate_source == "missing_target":
+                failure_source = "model_missing_coordinate_and_target"
+                failure_reason = "模型未提供坐标，且缺少可定位的目标描述"
+            elif coordinate_source == "unresolved_target":
+                failure_source = "model_missing_coordinate_enhancer_unresolved"
+                failure_reason = "模型未提供坐标，enhancer 也未能补出坐标"
+            else:
+                failure_source = "model_missing_coordinate"
+                failure_reason = "模型未提供坐标，当前点击无法执行"
+        else:
+            failure_source = coordinate_source or "enhancer_unresolved"
+            failure_reason = "模型原始坐标不可复用，enhancer 也未能补出新坐标"
 
         result = {
             "step_completed": False,
@@ -928,8 +1011,10 @@ class VisionDecisionLoop:
             "template": "click_preflight",
             "target_name": target_description,
             "details": [
-                "click 缺少可执行坐标，已跳过无效点击"
+                failure_reason
             ],
+            "failure_source": failure_source,
+            "coordinate_source": coordinate_source,
             "exec_skipped": True,
         }
         self._apply_hint_flags(result)
@@ -983,6 +1068,7 @@ class VisionDecisionLoop:
             and self.last_target_description
         ):
             retry_action.pop("coordinate", None)
+            retry_action["_retry_coordinate_reset"] = True
         retry_action["reason"] = "上一轮验证建议 retry same action"
         return retry_action
 

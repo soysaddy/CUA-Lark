@@ -635,7 +635,16 @@ class TransitionVerifier:
                 return "im_chat"
             if state == "message_list_visible":
                 return "im_main"
-            transition = str(signal.get("expected_transition", "") or "")
+            transition_data = signal.get("expected_transition", "")
+            if isinstance(transition_data, dict):
+                to_page = str(
+                    transition_data.get("target_page", "")
+                    or transition_data.get("to", "")
+                    or ""
+                ).strip()
+                if to_page:
+                    return to_page
+            transition = str(transition_data or "")
             if "->" in transition:
                 to_part = transition.split("->", 1)[1].strip()
                 if to_part.startswith("im_chat"):
@@ -781,8 +790,19 @@ class TransitionVerifier:
                 str(signal.get("target_page", "") or ""),
                 str(signal.get("target", "") or ""),
                 str(signal.get("target_name", "") or ""),
-                str(signal.get("expected_transition", "") or ""),
             ]
+            transition = signal.get("expected_transition", "")
+            if isinstance(transition, dict):
+                parts.extend(
+                    [
+                        str(transition.get("from", "") or ""),
+                        str(transition.get("to", "") or ""),
+                        str(transition.get("target_page", "") or ""),
+                        str(transition.get("target_name", "") or ""),
+                    ]
+                )
+            else:
+                parts.append(str(transition or ""))
             return " ".join(part for part in parts if part)
         return str(signal or "")
 

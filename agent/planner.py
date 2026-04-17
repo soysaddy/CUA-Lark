@@ -112,7 +112,7 @@ class VisionPlanner:
                             "7. success_signal 只需描述结构化目标，例如 {target_page,target_name,expected_transition}\n"
                             "8. 消息任务可在 plan 顶层补充 preferred_path / fallback_path / expected_transition，而不是把整条固定路径写死\n\n"
                             "请输出 json: {feasible, confidence, goal, preferred_path?, fallback_path?, expected_transition?, steps[], reasoning, risk_notes}\n"
-                            "steps 中每个元素: {id, description, type, success_signal, when?, fallback?}"
+                            "steps 中每个元素: {id, description, type, success_signal}"
                         ),
                     },
                     {"role": "user", "content": user_parts},
@@ -197,7 +197,7 @@ class VisionPlanner:
                     {
                         "id": 1,
                         "description": "打开飞书全局搜索",
-                        "type": "navigation",
+                        "type": "search_open",
                         "success_signal": "搜索框已打开",
                     },
                     {
@@ -209,7 +209,7 @@ class VisionPlanner:
                     {
                         "id": 3,
                         "description": f"点击联系人{contact}",
-                        "type": "click",
+                        "type": "search_select",
                         "success_signal": f"进入与{contact}的聊天",
                     },
                     {
@@ -220,8 +220,8 @@ class VisionPlanner:
                     },
                     {
                         "id": 5,
-                        "description": "发送消息",
-                        "type": "verify",
+                        "description": "按回车发送消息",
+                        "type": "input",
                         "success_signal": f"消息{message}已出现在聊天中",
                     },
                 ],
@@ -239,7 +239,7 @@ class VisionPlanner:
                     {
                         "id": 1,
                         "description": "点击左侧导航栏的「云文档」图标",
-                        "type": "navigation",
+                        "type": "module_navigation",
                         "success_signal": "云文档主页已显示",
                     },
                 ],
@@ -257,13 +257,13 @@ class VisionPlanner:
                     {
                         "id": 1,
                         "description": "点击左侧导航栏的「云文档」图标",
-                        "type": "navigation",
+                        "type": "module_navigation",
                         "success_signal": "已进入文档页",
                     },
                     {
                         "id": 2,
-                        "description": "点击新建文档按钮",
-                        "type": "click",
+                        "description": "打开新建文档入口",
+                        "type": "list_item_open",
                         "success_signal": "已打开文档编辑页",
                     },
                     {
@@ -287,13 +287,13 @@ class VisionPlanner:
                     {
                         "id": 1,
                         "description": "点击左侧导航栏的「日历」图标",
-                        "type": "navigation",
+                        "type": "module_navigation",
                         "success_signal": "已进入日历页",
                     },
                     {
                         "id": 2,
                         "description": "打开新建日程",
-                        "type": "click",
+                        "type": "list_item_open",
                         "success_signal": "新建日程表单已出现",
                     },
                     {
@@ -341,7 +341,11 @@ class VisionPlanner:
                 step_type,
                 description,
             )
-            step = dict(raw_step)
+            step = {
+                key: value
+                for key, value in dict(raw_step).items()
+                if key not in {"when", "fallback"}
+            }
             step.update(
                 {
                     "id": raw_step.get("id", index),
@@ -358,14 +362,21 @@ class VisionPlanner:
 
     @staticmethod
     def _infer_step_type(description: str) -> str:
-        if any(kw in description for kw in ("输入", "填写", "粘贴")):
-            return "input"
-        if any(kw in description for kw in ("打开搜索", "全局搜索", "搜索框")):
-            return "search_open"
         if "搜索结果" in description:
             return "search_select"
-        if any(kw in description for kw in ("左侧导航", "导航栏", "切到", "切换到", "消息入口", "云文档入口", "日历入口")):
+        if any(
+            kw in description
+            for kw in (
+                "左侧导航", "导航栏", "侧边栏", "模块", "消息入口",
+                "云文档入口", "日历入口", "切到消息", "切到云文档",
+                "切到日历", "消息页", "云文档页", "日历页",
+            )
+        ):
             return "module_navigation"
+        if any(kw in description for kw in ("打开搜索", "全局搜索", "搜索框", "搜索浮层")):
+            return "search_open"
+        if any(kw in description for kw in ("输入", "填写", "粘贴")):
+            return "input"
         if any(kw in description for kw in ("会话", "群聊", "聊天", "联系人")) and any(
             kw in description for kw in ("点击", "打开", "进入")
         ):
@@ -392,36 +403,65 @@ class VisionPlanner:
         if step_type == "module_navigation":
             return {
                 "target_page": page or "unknown",
-                "expected_transition": f"current -> {page or 'unknown'}",
+                "expected_transition": VisionPlanner._make_expected_transition(
+                    to_page=page or "unknown",
+                ),
                 "text": text,
             }
         if step_type == "list_item_open":
             return {
                 "target_page": "im_chat",
                 "target_name": target,
-                "expected_transition": "im_main -> im_chat(target)",
+                "expected_transition": VisionPlanner._make_expected_transition(
+                    from_page="im_main",
+                    to_page="im_chat",
+                    target_name=target,
+                ),
                 "text": text,
             }
         if step_type == "search_open":
             return {
                 "target_page": "search",
-                "expected_transition": "current -> search",
+                "expected_transition": VisionPlanner._make_expected_transition(
+                    to_page="search",
+                ),
                 "text": text,
             }
         if step_type == "search_select":
             return {
                 "target_page": "im_chat",
                 "target_name": target,
-                "expected_transition": "search -> im_chat(target)",
+                "expected_transition": VisionPlanner._make_expected_transition(
+                    from_page="search",
+                    to_page="im_chat",
+                    target_name=target,
+                ),
                 "text": text,
             }
         if step_type == "input":
             return {
                 "target_name": target,
-                "expected_transition": "input_updated",
+                "expected_transition": VisionPlanner._make_expected_transition(
+                    from_page="input",
+                    to_page="input_updated",
+                    target_name=target,
+                ),
                 "text": text,
             }
         return text
+
+    @staticmethod
+    def _make_expected_transition(
+        to_page: str,
+        from_page: str = "current",
+        target_name: str = "",
+    ) -> dict[str, str]:
+        return {
+            "from": from_page,
+            "to": to_page,
+            "target_page": to_page,
+            "target_name": target_name,
+        }
 
     @staticmethod
     def _apply_task_strategies(task_text: str, plan: dict[str, Any]) -> dict[str, Any]:
@@ -432,11 +472,17 @@ class VisionPlanner:
 
     @staticmethod
     def _looks_like_message_open_task(text: str) -> bool:
-        return (
-            "消息" in text
-            and any(keyword in text for keyword in ("查看", "进入", "打开", "定位"))
-            and any(keyword in text for keyword in ("群", "群聊", "会话", "聊天"))
+        target = VisionPlanner._extract_message_target(text)
+        has_open_verb = any(
+            keyword in text for keyword in ("查看", "进入", "打开", "定位", "切到", "切换到", "找", "找到")
         )
+        has_chat_object = any(
+            keyword in text for keyword in ("消息", "群", "群聊", "会话", "聊天", "私聊", "对话")
+        )
+        has_non_message_module = any(
+            keyword in text for keyword in ("云文档", "文档", "日历", "会议", "邮箱")
+        )
+        return has_open_verb and (has_chat_object or (bool(target) and not has_non_message_module))
 
     @staticmethod
     def _build_message_open_plan(
@@ -452,11 +498,11 @@ class VisionPlanner:
         plan.setdefault("fallback_path", "搜索定位")
         plan.setdefault(
             "expected_transition",
-            {
-                "from": "im_main",
-                "to": "im_chat",
-                "target_name": target,
-            },
+            VisionPlanner._make_expected_transition(
+                from_page="im_main",
+                to_page="im_chat",
+                target_name=target,
+            ),
         )
         steps = [
             VisionPlanner._enrich_message_step(step, target)
@@ -471,7 +517,11 @@ class VisionPlanner:
                     "success_signal": {
                         "target_page": "im_chat",
                         "target_name": target,
-                        "expected_transition": "im_main -> im_chat(target)",
+                        "expected_transition": VisionPlanner._make_expected_transition(
+                            from_page="im_main",
+                            to_page="im_chat",
+                            target_name=target,
+                        ),
                         "text": f"已进入「{target}」聊天页",
                     },
                 }
@@ -519,17 +569,23 @@ class VisionPlanner:
                 enriched["success_signal"] = {
                     "target_page": "im_chat",
                     "target_name": target,
-                    "expected_transition": (
-                        "search -> im_chat(target)"
-                        if step_type == "search_select"
-                        else "im_main -> im_chat(target)"
+                    "expected_transition": VisionPlanner._make_expected_transition(
+                        from_page=(
+                            "search"
+                            if step_type == "search_select"
+                            else "im_main"
+                        ),
+                        to_page="im_chat",
+                        target_name=target,
                     ),
                     "text": signal_text,
                 }
         elif step_type == "module_navigation" and not isinstance(signal, dict):
             enriched["success_signal"] = {
                 "target_page": "im_main",
-                "expected_transition": "current -> im_main",
+                "expected_transition": VisionPlanner._make_expected_transition(
+                    to_page="im_main",
+                ),
                 "text": str(signal or description or "消息页已打开"),
             }
         return enriched
@@ -541,8 +597,10 @@ class VisionPlanner:
         for pattern in (
             r"[「“\"]([^」”\"]{1,20})[」”\"]",
             r"名为[「“\"]?([^」”\"，。:：\s]{1,20})",
+            r"(?:打开|切到|切换到|进入|定位|找|找到)([^，。:：\s]{1,20})(?:群聊|聊天|会话)",
             r"进入([^\s，。、“”\"'「」『』]{1,20})(?:群聊|会话|聊天)",
             r"查看消息[-:： ]+([^\s，。、“”\"'「」『』]{1,20})",
+            r"(?:打开|切到|切换到|进入|找|找到|定位)([^\s，。、“”\"'「」『』]{1,20})$",
         ):
             match = re.search(pattern, text)
             if match:
@@ -565,6 +623,11 @@ class VisionPlanner:
             "搜索",
             "列表",
             "结果",
+            "云文档",
+            "文档",
+            "日历",
+            "会议",
+            "邮箱",
         )
         return not any(part in candidate for part in invalid_parts)
 
