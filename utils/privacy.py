@@ -3,8 +3,8 @@ from pathlib import Path
 from PIL import Image, ImageFilter
 
 
-def sanitize_image(image: Image.Image, blur_radius: float = 1.5) -> Image.Image:
-    return image.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+def sanitize_image(image: Image.Image) -> Image.Image:
+    return image.filter(ImageFilter.GaussianBlur(radius=1.5))
 
 
 def safe_filename(name: str) -> str:

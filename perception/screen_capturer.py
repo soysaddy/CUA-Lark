@@ -38,7 +38,7 @@ class ScreenCapturer:
                 )
 
         if config.sanitize_screenshots:
-            image = sanitize_image(image, blur_radius=config.privacy_blur_radius)
+            image = sanitize_image(image)
 
         if image.width > config.screenshot_max_width:
             ratio = config.screenshot_max_width / image.width
