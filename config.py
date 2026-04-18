@@ -19,7 +19,7 @@ class LarkWindowConfig:
 
 @dataclass
 class Config:
-    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "sk-W7YTOovYFrZ4kGEfx4n659lZ0t4DOrtkv8"))  # API Key，优先读环境变量
+    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "sk-"))  # API Key，优先读环境变量
     openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", "https://yunwu.ai/v1").rstrip("/"))  # API 地址，去掉末尾 /
     openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))  # 主模型
     planner_model: str = field(default_factory=lambda: os.getenv("OPENAI_PLANNER_MODEL", "gpt-5.4-mini"))  # 规划模型

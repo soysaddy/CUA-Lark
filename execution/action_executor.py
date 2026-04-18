@@ -69,14 +69,12 @@ class ActionExecutor:
             "right_click": pyautogui.rightClick,
         }.get(action["type"], pyautogui.click)
 
-        # 优先 AX 引用
         ax_ref = action.get("ax_ref")
         if ax_ref and getattr(ax_ref, "_raw_ref", None):
             if self.ax.perform_action(ax_ref, "AXPress"):
                 logger.debug("AX Press 成功")
                 return True
 
-        # AX 坐标（已是屏幕绝对坐标）
         if "ax_coordinate" in action:
             x, y = action["ax_coordinate"]
             logger.debug(f"AX 坐标点击: ({x}, {y})")

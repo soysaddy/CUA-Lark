@@ -18,7 +18,6 @@ class AXEnhancer:
         vision_action: dict,
         target_description: str,
         perception: FusedPerception,
-        visual_target: Optional[dict] = None,
     ) -> dict:
         enhanced = dict(vision_action)
         if enhanced.get("type") not in {"click", "double_click", "right_click"}:
@@ -46,15 +45,11 @@ class AXEnhancer:
             enhanced["ax_ref"] = matched
             return enhanced
 
-        som_instruction = self._som_instruction(
-            target_description=target_description,
-            visual_target=visual_target or {},
-        )
-        if som_instruction and perception.annotated_b64 and perception.som_description and perception.som_marks:
+        if target_description and perception.annotated_b64 and perception.som_description and perception.som_marks:
             located = self.vision.locate_element_by_som(
                 screenshot_b64=perception.annotated_b64,
                 som_description=perception.som_description,
-                instruction=som_instruction,
+                instruction=target_description,
             )
             som_id = int(located.get("som_id", 0) or 0)
             mark = next(
@@ -87,16 +82,6 @@ class AXEnhancer:
             for keyword in keywords:
                 if keyword.lower() in text:
                     score += 2.0
-            role_map = {
-                "搜索": ["AXTextField", "AXSearchField"],
-                "输入": ["AXTextField", "AXTextArea"],
-                "按钮": ["AXButton"],
-                "发送": ["AXButton"],
-                "链接": ["AXLink"],
-            }
-            for hint, roles in role_map.items():
-                if hint in target_description and elem.role in roles:
-                    score += 1.5
             if elem.role in {
                 "AXButton",
                 "AXTextField",
@@ -141,22 +126,6 @@ class AXEnhancer:
             return False
         width, height = perception.screenshot.size
         return 0 <= x < width and 0 <= y < height
-
-    @staticmethod
-    def _som_instruction(target_description: str, visual_target: dict) -> str:
-        parts = []
-        if target_description:
-            parts.append(target_description)
-        kind = str(visual_target.get("kind", "") or "")
-        anchor = str(visual_target.get("anchor", "") or "")
-        confidence = str(visual_target.get("confidence", "") or "")
-        if kind and kind != "unknown":
-            parts.append(f"目标类型: {kind}")
-        if anchor:
-            parts.append(f"位置提示: {anchor}")
-        if confidence and confidence != "low":
-            parts.append(f"置信度: {confidence}")
-        return "；".join(parts).strip()
 
     @staticmethod
     def _extract_keywords(description: str) -> list[str]:

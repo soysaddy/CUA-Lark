@@ -50,8 +50,6 @@ class PerceptionFusion:
         self.capturer = ScreenCapturer()
         self.ax = AXInspector()
         self.som = SoMAnnotator()
-        self._active_capture_key: Optional[int] = None
-        self._capture_materialized = False
         self._perception_cache: dict[tuple[int, bool, bool], FusedPerception] = {}
 
     @staticmethod
@@ -97,9 +95,6 @@ class PerceptionFusion:
             return None, None
         screen_data = self.capturer.capture_lark_window(capture_bounds)
         if screen_data:
-            capture_key = self._capture_key(screen_data)
-            self._active_capture_key = capture_key
-            self._capture_materialized = False
             self._perception_cache.clear()
         return screen_data, capture_bounds
 
@@ -112,10 +107,6 @@ class PerceptionFusion:
     ) -> FusedPerception:
         started_at = time.time()
         capture_key = self._capture_key(screen_data)
-        if capture_key != self._active_capture_key:
-            self._active_capture_key = capture_key
-            self._capture_materialized = False
-            self._perception_cache.clear()
         cache_key = (capture_key, with_ax, with_som)
         cached = self._perception_cache.get(cache_key)
         if cached:
@@ -126,13 +117,11 @@ class PerceptionFusion:
                 perception_duration_ms=0.0,
             )
 
-        capture_source = "fresh" if not self._capture_materialized else "reused"
-        self._capture_materialized = True
         result = FusedPerception(
             screenshot=Image.new("RGB", (1, 1)),
             screenshot_b64="",
             timestamp=time.time(),
-            capture_source=capture_source,
+            capture_source="fresh",
             ax_enabled=with_ax,
             som_enabled=False,
             capture_duration_ms=screen_data.get("capture_duration_ms", 0.0),
@@ -218,6 +207,7 @@ class PerceptionFusion:
             "AXTab", "AXToolbar",
         }
         lines = ["[页面结构信息 - 来自Accessibility API]"]
+        emitted = 0
         for elem in elements:
             if elem.role not in interactable_roles:
                 continue
@@ -236,6 +226,10 @@ class PerceptionFusion:
             parts.append(f"at({elem.position[0]},{elem.position[1]})")
             parts.append(f"size({elem.size[0]}x{elem.size[1]})")
             lines.append("  - " + " ".join(parts))
+            emitted += 1
+            if emitted >= 80:
+                lines.append("  (其余可交互元素已省略)")
+                break
         if len(lines) == 1:
             lines.append("  (未检测到可交互元素)")
         return "\n".join(lines)

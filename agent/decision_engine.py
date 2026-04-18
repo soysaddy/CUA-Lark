@@ -42,6 +42,9 @@ DECISION_PROMPT = f"""你是 CUA-Lark 的视觉决策核心。
 5. 遇到登录、验证码、系统权限、人工确认等必须人工处理的步骤，输出 pause_for_user
 6. 输出 current_page 时只用: im_main|im_chat|calendar|docs|search|unknown
 7. coordinate 是相对当前截图左上角的像素坐标
+8. 对 click / double_click / right_click，如果目标是小图标、无文字按钮、密集控件区域，必须给 2~3 个 click_candidates
+9. 所有 click_candidates 必须属于同一个目标，不允许把相邻控件当备用点
+10. action.coordinate 必须等于 rank=1 的候选点
 
 ## 可用动作
 - click
@@ -63,7 +66,14 @@ DECISION_PROMPT = f"""你是 CUA-Lark 的视觉决策核心。
   "action": {{
     "type": "click|double_click|right_click|type|hotkey|scroll|wait|done|fail|pause_for_user",
     "coordinate": [x, y],
-    "coordinate_candidates": [[x1, y1], [x2, y2], [x3, y3]],
+    "click_candidates": [
+      {{
+        "coordinate": [x, y],
+        "rank": 1,
+        "reason": "最可能的目标热区中心",
+        "confidence": "high"
+      }}
+    ],
     "text": "",
     "keys": [],
     "direction": "up|down",
@@ -225,7 +235,7 @@ class VisionDecisionEngine:
             "action": {
                 "type": "fail",
                 "reason": "当前环境缺少可用的视觉决策能力",
-                "coordinate_candidates": [],
+                "click_candidates": [],
             },
             "target_description": "",
             "visual_target": {
@@ -263,19 +273,31 @@ class VisionDecisionEngine:
         if coordinate:
             normalized["coordinate"] = coordinate
 
-        candidates: list[list[int]] = []
-        raw_candidates = action.get("coordinate_candidates", [])
+        candidates: list[dict] = []
+        raw_candidates = action.get("click_candidates", [])
         if isinstance(raw_candidates, list):
             for item in raw_candidates[:3]:
-                point = VisionDecisionEngine._normalize_point(item)
-                if point and point not in candidates:
-                    candidates.append(point)
-        if coordinate and coordinate not in candidates:
-            candidates.insert(0, coordinate)
+                candidate = VisionDecisionEngine._normalize_click_candidate(item)
+                if candidate and candidate["coordinate"] not in [c["coordinate"] for c in candidates]:
+                    candidates.append(candidate)
+        if coordinate and coordinate not in [c["coordinate"] for c in candidates]:
+            candidates.insert(
+                0,
+                {
+                    "coordinate": coordinate,
+                    "rank": 1,
+                    "reason": "主点击点",
+                    "confidence": "high",
+                },
+            )
+        candidates = candidates[:3]
+        for idx, candidate in enumerate(candidates, start=1):
+            candidate["rank"] = idx
         if candidates:
-            normalized["coordinate_candidates"] = candidates[:3]
+            normalized["click_candidates"] = candidates
+            normalized["coordinate"] = list(candidates[0]["coordinate"])
         else:
-            normalized["coordinate_candidates"] = []
+            normalized["click_candidates"] = []
         return normalized
 
     @staticmethod
@@ -287,3 +309,21 @@ class VisionDecisionEngine:
         except Exception:
             return None
         return [x, y]
+
+    @staticmethod
+    def _normalize_click_candidate(value: object) -> Optional[dict]:
+        if not isinstance(value, dict):
+            return None
+        point = VisionDecisionEngine._normalize_point(value.get("coordinate"))
+        if not point:
+            return None
+        try:
+            rank = int(value.get("rank", 0) or 0)
+        except Exception:
+            rank = 0
+        return {
+            "coordinate": point,
+            "rank": rank,
+            "reason": str(value.get("reason", "") or ""),
+            "confidence": str(value.get("confidence", "medium") or "medium"),
+        }
