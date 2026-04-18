@@ -19,11 +19,73 @@ except Exception:
 
 class WindowManager:
     APP_CANDIDATES = ("Lark", "飞书", "Feishu")
+    APP_LABELS = tuple(name.lower() for name in APP_CANDIDATES)
     TOLERANCE = 10
     SETTLE_RETRIES = 5
     SETTLE_INTERVAL = 0.2
 
     # ── 内部辅助 ──────────────────────────────────────────────
+
+    @classmethod
+    def _normalize_window_label(cls, value: str) -> str:
+        text = str(value or "").strip().lower()
+        return text.strip("-_:/[](){}| ")
+
+    @classmethod
+    def _matches_window_keyword(cls, value: str) -> bool:
+        return cls._normalize_window_label(value) in cls.APP_LABELS
+
+    @classmethod
+    def _is_lark_window_candidate(cls, window: dict) -> bool:
+        if int(window.get("kCGWindowLayer", 0) or 0) != 0:
+            return False
+        if float(window.get("kCGWindowAlpha", 1) or 1) == 0:
+            return False
+
+        owner = str(window.get("kCGWindowOwnerName", "") or "")
+        name = str(window.get("kCGWindowName", "") or "")
+        if cls._matches_window_keyword(owner):
+            return True
+        return cls._matches_window_keyword(name)
+
+    @classmethod
+    def _list_lark_windows(cls) -> list[dict]:
+        if not Quartz:
+            return []
+        try:
+            windows = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID
+            )
+        except Exception as exc:
+            logger.warning(f"读取窗口列表失败: {exc}")
+            return []
+
+        matches = []
+        for window in windows or []:
+            if not cls._is_lark_window_candidate(window):
+                continue
+
+            owner = str(window.get("kCGWindowOwnerName", "") or "")
+            name = str(window.get("kCGWindowName", "") or "")
+            owner_matched = cls._matches_window_keyword(owner)
+            name_matched = cls._matches_window_keyword(name)
+            bounds = window.get("kCGWindowBounds", {}) or {}
+            width = int(bounds.get("Width", 0) or 0)
+            height = int(bounds.get("Height", 0) or 0)
+            x = int(bounds.get("X", 0) or 0)
+            y = int(bounds.get("Y", 0) or 0)
+            if width < 100 or height < 100:
+                continue
+            matches.append({
+                "window_id": int(window.get("kCGWindowNumber", 0) or 0),
+                "owner": owner,
+                "owner_pid": int(window.get("kCGWindowOwnerPID", 0) or 0),
+                "name": name,
+                "owner_matched": owner_matched,
+                "name_matched": name_matched,
+                "bounds": {"x": x, "y": y, "width": width, "height": height},
+            })
+        return matches
 
     @classmethod
     def _app_info(cls) -> Optional[dict]:
@@ -119,6 +181,10 @@ class WindowManager:
 
     @classmethod
     def get_window_bounds(cls, silent: bool = False) -> Optional[dict]:
+        window_info = cls.get_window_info()
+        if window_info and window_info.get("bounds"):
+            return window_info["bounds"]
+
         script = cls._window_script("""
         if (count of windows) = 0 then return ""
         set win to front window
@@ -148,50 +214,19 @@ class WindowManager:
         通过 Quartz CGWindowList 获取飞书主窗口信息（含 window_id）。
         不依赖飞书是否在前台。
         """
-        if not Quartz:
-            return None
-
-        app_info = cls._app_info()
-        if not app_info:
-            return None
-
-        try:
-            windows = Quartz.CGWindowListCopyWindowInfo(
-                Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID
-            )
-        except Exception as exc:
-            logger.warning(f"读取窗口列表失败: {exc}")
-            return None
-
-        matches = []
-        for window in windows or []:
-            if int(window.get("kCGWindowOwnerPID", 0) or 0) != app_info["pid"]:
-                continue
-            if int(window.get("kCGWindowLayer", 0) or 0) != 0:
-                continue
-            if float(window.get("kCGWindowAlpha", 1) or 1) == 0:
-                continue
-
-            bounds = window.get("kCGWindowBounds", {}) or {}
-            width = int(bounds.get("Width", 0) or 0)
-            height = int(bounds.get("Height", 0) or 0)
-            x = int(bounds.get("X", 0) or 0)
-            y = int(bounds.get("Y", 0) or 0)
-            if width < 100 or height < 100:
-                continue
-            matches.append({
-                "window_id": int(window.get("kCGWindowNumber", 0) or 0),
-                "owner": str(window.get("kCGWindowOwnerName", "") or ""),
-                "owner_pid": app_info["pid"],
-                "name": str(window.get("kCGWindowName", "") or ""),
-                "bounds": {"x": x, "y": y, "width": width, "height": height},
-            })
-
+        matches = cls._list_lark_windows()
         if not matches:
             return None
 
-        # 优先选面积最大的窗口（即主窗口）
-        return max(matches, key=lambda m: m["bounds"]["width"] * m["bounds"]["height"])
+        # owner 精确命中优先于 name 精确命中；同类中再选面积最大的主窗口
+        return max(
+            matches,
+            key=lambda m: (
+                1 if m.get("owner_matched") else 0,
+                1 if m.get("name_matched") else 0,
+                m["bounds"]["width"] * m["bounds"]["height"],
+            ),
+        )
 
     @classmethod
     def set_window_bounds(cls, x: int, y: int, width: int, height: int) -> bool:

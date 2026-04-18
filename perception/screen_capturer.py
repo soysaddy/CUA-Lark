@@ -91,7 +91,7 @@ class ScreenCapturer:
             return None
 
         window_id = window_info["window_id"]
-        capture_bounds = bounds or window_info.get("bounds")
+        capture_bounds = window_info.get("bounds") or bounds
 
         started_at = time.time()
         image = self._capture_by_window_id(window_id)

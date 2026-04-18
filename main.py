@@ -82,6 +82,7 @@ def main() -> None:
     parser.add_argument("--check", action="store_true", help="环境检查")
     parser.add_argument("--dump-ax", action="store_true", help="打印飞书 AX 树")
     parser.add_argument("--interactive", action="store_true", help="交互模式")
+    parser.add_argument("--ui", action="store_true", help="启动极简前台小窗口")
     args = parser.parse_args()
 
     if args.check:
@@ -95,10 +96,17 @@ def main() -> None:
         print("\n❌ 环境检查未通过")
         sys.exit(1)
 
-    from agent.vision_loop import VisionDecisionLoop
+    if args.task:
+        from agent.vision_loop import VisionDecisionLoop
 
-    agent = VisionDecisionLoop()
+        agent = VisionDecisionLoop()
+        result = agent.run(args.task)
+        sys.exit(0 if result.success else 1)
+
     if args.interactive:
+        from agent.vision_loop import VisionDecisionLoop
+
+        agent = VisionDecisionLoop()
         print("\n🤖 CUA-Lark 交互模式 (输入 quit 退出)\n")
         while True:
             task = input("📝 任务: ").strip()
@@ -108,11 +116,13 @@ def main() -> None:
                 continue
             result = agent.run(task)
             print(f"\n{'✅' if result.success else '❌'} 步数:{len(result.steps)} 耗时:{result.total_duration:.1f}s\n")
-    else:
-        task = args.task or input("📝 任务: ").strip()
-        if task:
-            result = agent.run(task)
-            sys.exit(0 if result.success else 1)
+        return
+
+    if args.ui or not args.task:
+        from ui.quick_command_window import main as launch_quick_window
+
+        launch_quick_window()
+        return
 
 
 if __name__ == "__main__":

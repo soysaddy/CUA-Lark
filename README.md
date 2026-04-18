@@ -1,47 +1,66 @@
 # CUA-Lark
 
-基于 macOS Accessibility、窗口截图和视觉决策的飞书桌面端自动化项目。
+基于 macOS 截图、Accessibility 和视觉大模型的飞书桌面端 GUI Agent。
 
-当前实际入口是视觉 Agent：
+当前主链路已经收敛为视觉优先闭环：
 
-- 任务规划：`agent/planner.py`
-- 感知融合：`agent/perception_fusion.py`
-- 主执行循环：`agent/vision_loop.py`
-- 动作执行：`execution/`
-- 护栏与恢复：`agent/guardrail.py`、`execution/recovery.py`
+`observe -> think -> act -> verify`
+
+其中：
+
+- 视觉模型是主判断源
+- planner 只提供高层目标和候选路径
+- verifier 以视觉验证为主，AX/规则只做辅助证据
+- guardrail / recovery 只做全局兜底
+
+## 当前结构
+
+- `agent/planner.py`
+  高层任务规划器，只输出：
+  - `goal`
+  - `preferred_path`
+  - `fallback_path`
+  - `expected_transition`
+- `agent/decision_engine.py`
+  视觉决策器，负责 `think`
+- `agent/vision_loop.py`
+  主协调器，负责 `observe -> think -> act -> verify`
+- `verification/transition_verifier.py`
+  视觉优先验证器，负责动作后迁移判断和任务完成判断
+- `agent/perception_fusion.py`
+  截图、AX、SoM 融合
+- `execution/action_executor.py`
+  动作执行
+- `agent/guardrail.py`
+  全局安全兜底
+- `execution/recovery.py`
+  脱困和回安全状态
+- `ui/quick_command_window.py`
+  极简前台小窗口入口
 
 ## 当前能力
 
-- 自然语言下发飞书桌面端任务
-- 结合截图、AX 信息和视觉模型决定下一步 GUI 操作
-- 环境检查、窗口标准化、AX 树导出
-- Gradio Demo
-- 单独验证 `gpt-4o` 图片识别
+更适合这类飞书桌面端任务：
 
-当前更适合这类任务：
+- 打开消息、日历、云文档等常见模块
+- 打开某个群聊 / 会话
+- 简单输入、发送、搜索类任务
+- 以当前飞书界面为基础的短流程导航任务
 
-- 打开消息、文档、日历等常见模块
-- 简单导航和输入类操作
-- 基于当前飞书界面的短流程任务
-- 遇到需要人工确认的步骤时中止并交还给用户
+当前不追求：
 
-当前 planner 更偏“策略化规划”，不是固定脚本模板：
-
-- plan 顶层可包含 `preferred_path`、`fallback_path`、`expected_transition`
-- step 里会尽量保留结构化目标，而不是把 verifier 规则写死到规划里
-- 消息场景通常表达为：
-  - 首选路径：列表直达
-  - 备选路径：搜索定位
-  - 期望迁移：`im_main -> im_chat(target)`
+- 复杂多页面长流程自动化
+- 浏览器/系统设置/飞书外部网站联动
+- 完整控制台式调度界面
 
 ## 环境要求
 
 - macOS
 - Python 3.10+
 - 已安装并登录飞书桌面客户端
-- 终端具备以下系统权限：
-  - 辅助功能
-  - 屏幕录制
+- 当前终端具备：
+  - 辅助功能权限
+  - 屏幕录制权限
 
 建议使用虚拟环境：
 
@@ -53,7 +72,7 @@ pip install -r requirements.txt
 
 ## 依赖
 
-当前关键依赖：
+关键依赖包括：
 
 - `openai==1.40.0`
 - `httpx<0.28`
@@ -64,7 +83,7 @@ pip install -r requirements.txt
 - `pyobjc-framework-Quartz`
 - `gradio`
 
-如果你已经装过依赖，建议确认 `httpx` 没有被升级到 `0.28+`：
+如果环境里 `httpx` 被升级到 `0.28+`，建议重新固定：
 
 ```bash
 pip install --upgrade "openai==1.40.0" "httpx<0.28"
@@ -72,9 +91,9 @@ pip install --upgrade "openai==1.40.0" "httpx<0.28"
 
 ## 模型配置
 
-项目通过 `OpenAI` 兼容接口调用模型，支持官方接口和兼容 OpenAI 的中转站。
+项目通过 OpenAI 兼容接口调用模型，支持官方接口和中转站。
 
-推荐通过环境变量配置：
+建议用环境变量配置：
 
 ```bash
 export OPENAI_API_KEY="你的 key"
@@ -85,25 +104,25 @@ export OPENAI_PLANNER_MODEL="gpt-4o"
 
 说明：
 
-- `OPENAI_BASE_URL` 可留空；留空时走官方默认地址
-- 如果用中转站，通常需要带 `/v1`
-- 当前图片理解和视觉决策依赖多模态模型，推荐 `gpt-4o`
+- `OPENAI_BASE_URL` 可为空；为空时走官方默认地址
+- 如果使用中转站，通常需要带 `/v1`
+- 视觉决策和验证依赖多模态模型，推荐 `gpt-4o`
 
-项目的实际默认值定义在 [config.py](/Users/saddy/Documents/技术与开发/CUA-Lark/config.py)。
+默认值定义在 `config.py`。
 
 ## 首次运行前
 
-1. 打开飞书并确保已登录。
-2. 给当前终端开启 `辅助功能`。
-3. 给当前终端开启 `屏幕录制`。
-4. 如果系统弹出 `自动化` 授权，允许终端控制 `System Events` 和飞书。
+1. 打开飞书并确保已登录
+2. 给当前终端开启 `辅助功能`
+3. 给当前终端开启 `屏幕录制`
+4. 如系统弹出 `自动化` 授权，允许终端控制 `System Events` 和飞书
 
-如果这些权限不完整，常见现象包括：
+如果权限不完整，常见现象包括：
 
 - `osascript 不允许辅助访问`
 - 窗口标准化失败
 - 读不到 AX 元素
-- 无法执行键盘和鼠标操作
+- 键鼠操作发不到飞书前台
 
 ## 运行方式
 
@@ -113,13 +132,13 @@ export OPENAI_PLANNER_MODEL="gpt-4o"
 python3 main.py --check
 ```
 
-会检查：
+检查项包括：
 
 - 辅助功能权限
 - 屏幕录制权限
 - Pillow 依赖
 - 飞书是否运行
-- 飞书窗口是否可标准化
+- 窗口是否可标准化
 - `OPENAI_API_KEY` 是否存在
 
 ### 打印飞书 AX 树
@@ -128,49 +147,73 @@ python3 main.py --check
 python3 main.py --dump-ax
 ```
 
-用于查看当前飞书页面的辅助功能结构。
-
 ### 执行单个任务
 
 ```bash
-python3 main.py --task "打开云文档模块"
+python3 main.py --task "打开日历页面"
+python3 main.py --task "打开大群聊天"
 python3 main.py --task "给张三发消息：明天下午3点开会"
 ```
 
-### 单次交互输入
+### 默认启动方式
 
 ```bash
 python3 main.py
 ```
 
-程序会提示输入一条任务，然后执行一次。
+默认会启动极简前台小窗口，不再走命令行单次输入。
 
-### 连续交互模式
+### 显式启动极简前台小窗口
+
+```bash
+python3 main.py --ui
+```
+
+### 交互模式
 
 ```bash
 python3 main.py --interactive
 ```
 
-会进入循环输入模式，输入 `quit` / `exit` / `q` 退出。
+### 极简前台小窗口
 
-### 启动 Gradio Demo
+```bash
+python3 ui/quick_command_window.py
+```
+
+这个窗口：
+
+- 始终置顶
+- 只有任务输入框、发送按钮、一行状态文本
+- 后台线程执行 agent，不会阻塞 UI
+- `python3 main.py` 和 `python3 main.py --ui` 都会进入这个窗口
+
+状态只有：
+
+- `空闲`
+- `执行中`
+- `完成`
+- `失败：xxx`
+- `需要接管：xxx`
+
+### 启动优先级
+
+- `python3 main.py --task "..."`：直接执行单个任务，不弹窗口
+- `python3 main.py --interactive`：进入命令行交互模式
+- `python3 main.py --ui`：显式启动极简前台小窗口
+- `python3 main.py`：默认启动极简前台小窗口
+
+### Gradio Demo
 
 ```bash
 python3 demo.py
 ```
 
-默认会启动本地页面，并创建一个临时 `gradio.live` 分享地址。
-
-当前返回结果 JSON 除了成功与否，还会包含：
-
-- `handoff_required`
-- `handoff_reason`
-
-当模型判断当前步骤必须由用户处理时，会返回人工接管状态，而不是继续盲目操作。
+当前 Demo 只返回结果 JSON，不展示中间步骤控制台。
 
 ## 图片识别单测
 
-验证当前模型和中转站是否支持图片输入，可以单独跑：
+单独验证当前模型/中转站是否支持图片输入：
 
 ```bash
 python3 test_vision.py ./1.png
@@ -182,111 +225,230 @@ python3 test_vision.py ./1.png
 python3 test_vision.py ./1.png --prompt "请识别这个飞书界面里当前在哪个模块，并指出可点击的入口。"
 ```
 
-这一步不会驱动飞书，只会测试：
+## Planner
 
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- 当前模型是否支持多模态图片输入
+当前 planner 已降级为高层策略提供者，不再输出执行步骤。
 
-## 运行产物
+plan 只包含：
 
-每次运行会在 `runs/<时间戳>/` 下生成结果：
+- `goal`
+- `preferred_path`
+- `fallback_path`
+- `expected_transition`
+- `feasible`
+- `confidence`
+- `reasoning`
+- `risk_notes`
 
-- `step_01.png`、`step_02.png`：每一步截图
-- `step_01_som.png`：带标注的 SoM 图
-- `trace.json`：完整执行轨迹
+`expected_transition` 使用统一结构：
 
-CLI 结束时会输出执行状态；详细轨迹可以直接查看 `runs/`。
+```json
+{
+  "from": "current",
+  "to": "<canonical_page_or_state>",
+  "target_page": "<canonical_page_or_state>",
+  "target_name": "<optional_target_name>",
+  "text": "<human_readable_goal>"
+}
+```
 
-`trace.json` 里当前会额外记录：
+说明：
 
-- 每一步的 `verification`
-- 如触发恢复，会记录 `verification.recovery`
-- 如进入人工接管，会记录 `handoff_required` 和 `handoff_reason`
-- 每一步的 `verification.perception_diag`，用于区分：
-  - `screenshot_size`
-  - `raw_size`
-  - `resized_size`
-  - `window_bounds`
-  - `capture_source`
-  - `size_assessment`
+- `to` / `target_page` 使用系统内部 canonical page/state id
+- planner 只做少量高层结构化，不承担完成判断，不决定具体点击哪个控件
 
-## 窗口与截图说明
+## 视觉主循环
 
-当前窗口相关逻辑在 [utils/window_manager.py](/Users/saddy/Documents/技术与开发/CUA-Lark/utils/window_manager.py)：
+主循环位于 `agent/vision_loop.py`。
 
-- 会识别 `Lark / 飞书 / Feishu`
-- 启动时尝试激活并标准化飞书窗口
-- 默认目标窗口模式是 `centered_ratio`
-- 标准化成功判定同时检查 `x / y / width / height`
+实际流程是：
 
-当前截图逻辑在 [perception/screen_capturer.py](/Users/saddy/Documents/技术与开发/CUA-Lark/perception/screen_capturer.py)：
+1. `observe`
+   - 获取当前截图
+   - 视需要融合 AX / SoM
+2. `think`
+   - 由 `agent/decision_engine.py` 调视觉模型判断当前状态和下一步动作
+3. `act`
+   - 由 `execution/action_executor.py` 执行动作
+4. `verify`
+   - 由 `verification/transition_verifier.py` 统一做动作后迁移判断和任务完成判断
 
-- 全屏截图使用 macOS `screencapture`
-- 飞书窗口截图优先使用窗口级截图 `screencapture -l <window_id>`
-- 截图后会做 Retina 尺寸修正
+现在主循环不再依赖：
+
+- plan steps
+- 固定 step type 驱动
+- scattered completion patch
+- 到处散落的 done 判定
+
+## Verifier
+
+当前 verifier 是视觉优先验证器。
+
+核心职责只有两个：
+
+- 动作后是否发生预期状态迁移
+- 当前任务是否已完成
+
+统一输出字段包括：
+
+- `state`
+- `transition`
+- `step_completed`
+- `task_completed`
+- `confidence`
+- `evidence`
+- `next_step_hint`
+
+原则：
+
+- 视觉结果是主事实来源
+- AX / `expected_transition` / 规则只作为辅助证据
+- 弱辅助证据不能推翻高置信视觉事实
+
+## Guardrail
+
+`agent/guardrail.py` 现在只做全局安全兜底，不再做页面语义判断。
+
+主要消费结构化字段：
+
+- `step_num`
+- `decision.confidence`
+- `decision.current_page`
+- `decision.action`
+- `verify_result.task_completed`
+- `verify_result.step_completed`
+- `verify_result.progress_made`
+- `verify_result.next_step_hint`
+- `verify_result.post_action_state`
+
+主要处理：
+
+- 总步数过高
+- 连续 low confidence
+- 连续无 `progress_made`
+- 连续 retry 且动作/状态不变
+- 连续 unknown/other 页面
+- 重复动作过多
 
 注意：
 
-- 截图不等于可交互；即使能截到飞书，执行点击和热键时仍建议让飞书处于前台
-- 任务执行期间不要继续操作鼠标键盘
-- 恢复动作执行前会先尝试把飞书切回前台；如果失败，会停止自动恢复并转入人工接管
+- 如果 `verify_result.task_completed = true`，guardrail 完全放行
+- “重复动作过多”现在优先 `REPLAN`
+- `RECOVER` 只用于明显异常状态，例如：
+  - 连续未知页面
+  - 失焦
+  - 弹窗/遮挡
+  - 空白/异常窗口
 
-感知融合在 [agent/perception_fusion.py](/Users/saddy/Documents/技术与开发/CUA-Lark/agent/perception_fusion.py)：
+## Recovery
 
-- `capture_screen()` 只负责拿 `screen_data + bounds`
-- `perceive_from_capture()` 负责基于已有截图做 AX / SoM / 坐标系构建
-- 同一份 `screen_data` 会尽量复用，避免同一步重复 enrich
-- `annotated_b64` 改为惰性生成，只有确实要发 SoM 标注图给模型时才编码
-- `FusedPerception` 里当前会保留最小审计字段：
-  - `capture_source: fresh / reused`
-  - `ax_enabled`
-  - `som_enabled`
+`execution/recovery.py` 只负责：
 
-## 已知行为
+- 脱困
+- 回到安全状态
 
-- 当前主流程是通用视觉 Agent，不是“固定脚本点击器”，简单任务也可能走多轮截图、规划、验证和恢复
-- planner 当前更接近“候选路径 + 期望状态迁移”，执行层会结合当前状态决定是否走列表、导航或搜索 fallback
-- `RecoveryManager` 已改为状态驱动恢复，不再只是固定热键脚本
-- recovery 的目标是回到飞书的“已知安全状态”，当前安全页包括：`im_main`、`im_chat`、`calendar`、`docs`、`search`
-- recovery 每执行一步动作后都会重新做状态检查，状态至少包含：
-  - 当前页面
-  - 页面置信度：`confirmed` / `inferred` / `unknown`
-  - 是否前台
-  - 是否存在弹窗
-- recovery 的结果当前分为：
-  - `recovered`
-  - `retryable`
-  - `need_replan`
-  - `handoff`
-- 只有页面状态被本轮真实观测为 `confirmed` 时，才会直接判定为 `recovered`
-- 如果视觉验证不能确认“步骤已完成”，可能出现重复截图、重规划或恢复
-- 如果出现登录、验证码、系统权限、人工确认等步骤，模型可以返回 `pause_for_user`，主循环会停止并要求人工接管
-- 对“截图过小 / 看不清 / 低置信度”这类系统性感知失败，主循环现在不会立即 handoff，而是优先：
-  - 重拍 / 重感知一次
-  - 尝试消费 planner 的搜索 fallback
-  - 连续失败后才 handoff
-- 这类最终 handoff 文案已改成内部原因，例如：
-  - `当前窗口尺寸异常，已重试和 fallback 仍无法确认目标`
-  - `已重试和 fallback 仍无法确认目标，当前更适合由用户接管`
-- `demo.py` 返回的是结果 JSON，不展示中间每一步的可视化过程
+不负责：
 
-动作后验证当前由 [verification/transition_verifier.py](/Users/saddy/Documents/技术与开发/CUA-Lark/verification/transition_verifier.py) 统一输出：
+- step 完成判断
+- task 完成判断
+- verifier 级别页面语义解释
 
-- `status: confirmed / inferred / unknown / failed`
-- `transition`
-- `next_step_hint: retry / wait / reobserve / replan / handoff`
-- `template`
-- `target_name`
+返回状态只有：
 
-当前已落地的模板包括：
+- `recovered`
+- `retryable`
+- `need_replan`
+- `handoff`
 
-- `navigation_to_page`
-- `list_item_to_detail`
-- `search_result_open`
-- `search_overlay`
-- `dialog_visibility`
-- `input_edit`
+## Perception
+
+`agent/perception_fusion.py` 现在是简单的最小复用模型，不做复杂缓存。
+
+### 当前模式
+
+- `observe_light()`
+  - screenshot only
+  - 不跑 AX
+  - 不跑 SoM
+- `observe_structured()`
+  - screenshot + AX
+  - 不跑 SoM
+- `observe_annotated()`
+  - screenshot + AX + SoM
+
+默认 `perceive()` 现在是轻量模式：
+
+- `with_som=False`
+- `with_ax=False`
+
+### 字段语义
+
+`FusedPerception` 里保留这些审计字段：
+
+- `capture_source`
+  - `fresh`：当前 capture 第一次被融合
+  - `reused`：同一 capture 对象再次复用
+- `capture_duration_ms`
+  - 截图本身耗时
+- `perception_duration_ms`
+  - 基于已有 capture 做 AX / SoM / 坐标系构建的耗时
+- `ax_enabled`
+- `som_enabled`
+
+### 缓存范围
+
+当前缓存只在“同一 capture 对象”内生效：
+
+- `_capture_key = id(screen_data)`
+- 不是内容级缓存
+- 不是跨截图缓存
+- 不是跨步骤历史缓存
+
+## 窗口与截图
+
+窗口管理在 `utils/window_manager.py`：
+
+- 识别 `Lark / 飞书 / Feishu`
+- 启动时尝试激活并标准化窗口
+- 默认目标窗口模式是 `centered_ratio`
+
+截图逻辑在 `perception/screen_capturer.py`：
+
+- macOS `screencapture`
+- 优先窗口级截图
+- 带 Retina 修正
+
+注意：
+
+- 截图不等于可交互
+- 鼠标键盘动作仍建议飞书处于前台
+- 执行期间不要继续手动操作鼠标键盘
+
+## 运行产物
+
+每次运行会在 `runs/<时间戳>/` 下生成：
+
+- `step_01.png`、`step_02.png`：每步截图
+- `step_01_som.png`：如有 SoM 标注则保存
+- `trace.json`：完整执行轨迹
+
+`trace.json` 当前包含：
+
+- `plan`
+- 每一步的：
+  - `observation`
+  - `thinking`
+  - `action_decided`
+  - `action_executed`
+  - `verification`
+  - `duration`
+- 顶层：
+  - `success`
+  - `error`
+  - `handoff_required`
+  - `handoff_reason`
+  - `vision_calls`
+  - `total_tokens`
 
 ## 测试与校验
 
@@ -300,20 +462,20 @@ PYTHONPYCACHEPREFIX=/tmp/cua-lark-pyc python3 -m py_compile $(rg --files -g '*.p
 
 - `main.py`：CLI 入口
 - `demo.py`：Gradio Demo
-- `config.py`：全局配置
-- `agent/`：当前主执行链，包含规划、感知融合、护栏和视觉循环
-- `perception/`：AX、截图、SoM、视觉识别
-- `execution/`：动作执行、输入、恢复
-- `verification/`：状态迁移验证
-- `utils/`：窗口管理、OpenAI 客户端、坐标工具
+- `ui/quick_command_window.py`：极简前台小窗口
+- `agent/`：planner、decision engine、vision loop、guardrail、perception fusion、state schema
+- `perception/`：截图、AX、SoM、视觉模型接口
+- `execution/`：动作执行、恢复
+- `verification/`：视觉优先验证器
+- `utils/`：窗口管理、坐标、OpenAI 客户端等
 - `runs/`：运行产物
 
 ## 当前限制
 
 - 仅支持 macOS
-- 强依赖飞书桌面端当前 UI 结构
-- 视觉链路依赖远程模型，请求耗时会明显高于固定脚本
-- planner 虽然已改成更通用的策略表达，但执行层对 `preferred_path / fallback_path` 的消费仍以消息场景为主
-- 中转站如果对 `json_object`、图片消息格式或多模态支持不完整，会导致视觉决策失败
-- 文档、日历等任务仍偏 MVP，稳定性依赖本机界面和账号状态
-- recovery 虽然已改为状态驱动，但页面识别仍依赖 AX 和视觉结果，复杂弹窗或异常页面仍可能进入 `need_replan` 或 `handoff`
+- 强依赖飞书桌面端当前 UI
+- 视觉链路依赖远程模型，速度明显慢于固定脚本
+- planner 已经收敛为高层策略，但高层文本结构化仍有少量关键词规则
+- verifier 虽然已改成视觉优先，但任务稳定性仍取决于模型对当前飞书截图的判断质量
+- 当前环境下如果缺少 `Pillow` / `pyautogui` / macOS 权限，主链路无法正常运行
+- 仍更适合短流程任务，不适合复杂长链事务

@@ -56,11 +56,10 @@ class PerceptionFusion:
 
     @staticmethod
     def _get_bounds() -> Optional[dict]:
-        """获取窗口逻辑边界，AppleScript 优先，Quartz 兜底。"""
+        """获取已锁定飞书主窗口的逻辑边界。"""
         bounds = WindowManager.get_window_bounds(silent=True)
         if bounds:
             return bounds
-        # 飞书不在前台时 AppleScript 可能失败，用 Quartz 兜底
         window_info = WindowManager.get_window_info()
         if window_info and window_info.get("bounds"):
             return window_info["bounds"]

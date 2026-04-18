@@ -86,9 +86,27 @@ class VisionDecisionLoop:
         )
         result.plan = plan
         result.goal = plan.get("goal", user_input)
+        self._flush_trace(
+            result=result,
+            run_dir=run_dir,
+            started_at=started_at,
+            decision_calls_before=decision_calls_before,
+            decision_tokens_before=decision_tokens_before,
+            verify_calls_before=verify_calls_before,
+            verify_tokens_before=verify_tokens_before,
+        )
         if not plan.get("feasible", False):
             result.error = f"任务不可行: {plan.get('reasoning', '')}"
             result.total_duration = time.time() - started_at
+            self._flush_trace(
+                result=result,
+                run_dir=run_dir,
+                started_at=started_at,
+                decision_calls_before=decision_calls_before,
+                decision_tokens_before=decision_tokens_before,
+                verify_calls_before=verify_calls_before,
+                verify_tokens_before=verify_tokens_before,
+            )
             return result
 
         logger.info(
@@ -153,6 +171,15 @@ class VisionDecisionLoop:
                     )
                 )
                 self.last_verification = verify_result
+                self._flush_trace(
+                    result=result,
+                    run_dir=run_dir,
+                    started_at=started_at,
+                    decision_calls_before=decision_calls_before,
+                    decision_tokens_before=decision_tokens_before,
+                    verify_calls_before=verify_calls_before,
+                    verify_tokens_before=verify_tokens_before,
+                )
                 result.success = True
                 break
 
@@ -180,6 +207,15 @@ class VisionDecisionLoop:
                         duration=0.0,
                     )
                 )
+                self._flush_trace(
+                    result=result,
+                    run_dir=run_dir,
+                    started_at=started_at,
+                    decision_calls_before=decision_calls_before,
+                    decision_tokens_before=decision_tokens_before,
+                    verify_calls_before=verify_calls_before,
+                    verify_tokens_before=verify_tokens_before,
+                )
                 break
 
             if action_type == "fail":
@@ -203,44 +239,62 @@ class VisionDecisionLoop:
                         duration=0.0,
                     )
                 )
+                self._flush_trace(
+                    result=result,
+                    run_dir=run_dir,
+                    started_at=started_at,
+                    decision_calls_before=decision_calls_before,
+                    decision_tokens_before=decision_tokens_before,
+                    verify_calls_before=verify_calls_before,
+                    verify_tokens_before=verify_tokens_before,
+                )
                 break
 
             enhanced_action = self.ax_enhancer.enhance(
                 vision_action=action,
                 target_description=decision.get("target_description", ""),
                 perception=before_perception,
+                visual_target=decision.get("visual_target", {}),
             )
-            preflight = self._preflight_action(
-                original_action=action,
-                enhanced_action=enhanced_action,
-                target_description=decision.get("target_description", ""),
-                perception=before_perception,
-            )
-
             step_started = time.time()
             exec_success = False
             after_perception: Optional[FusedPerception] = None
 
-            if preflight is None:
-                exec_success = self.executor.execute(
-                    enhanced_action,
-                    before_perception.coord_system,
-                )
-                time.sleep(config.action_interval)
-                after_perception = self._observe_after_action()
-                verify_result = self.verifier.verify(
-                    TransitionContext(
-                        task_goal=result.goal,
-                        plan=plan,
-                        action=enhanced_action,
-                        decision=decision,
-                        before_perception=before_perception,
-                        after_perception=after_perception,
-                        exec_success=exec_success,
-                    )
+            if action_type in {"click", "double_click", "right_click"}:
+                enhanced_action, verify_result, exec_success, after_perception = self._execute_click_candidates(
+                    action=action,
+                    decision=decision,
+                    plan=plan,
+                    before_perception=before_perception,
                 )
             else:
-                verify_result = preflight
+                preflight = self._preflight_action(
+                    original_action=action,
+                    enhanced_action=enhanced_action,
+                    target_description=decision.get("target_description", ""),
+                    visual_target=decision.get("visual_target", {}),
+                    perception=before_perception,
+                )
+                if preflight is None:
+                    exec_success = self.executor.execute(
+                        enhanced_action,
+                        before_perception.coord_system,
+                    )
+                    time.sleep(config.action_interval)
+                    after_perception = self._observe_after_action()
+                    verify_result = self.verifier.verify(
+                        TransitionContext(
+                            task_goal=result.goal,
+                            plan=plan,
+                            action=enhanced_action,
+                            decision=decision,
+                            before_perception=before_perception,
+                            after_perception=after_perception,
+                            exec_success=exec_success,
+                        )
+                    )
+                else:
+                    verify_result = preflight
 
             verify_result["perception_diag"] = self._build_perception_diag(
                 after_perception or before_perception
@@ -252,7 +306,7 @@ class VisionDecisionLoop:
                 plan_step_description=self._plan_summary(plan),
                 observation=decision.get("observation", ""),
                 thinking=decision.get("thinking", ""),
-                action_decided=action,
+                action_decided={**action, "visual_target": decision.get("visual_target", {})},
                 action_executed=enhanced_action,
                 verification=verify_result,
                 screenshot_path=screenshot_path,
@@ -260,9 +314,39 @@ class VisionDecisionLoop:
             )
             result.steps.append(record)
             self.last_verification = verify_result
+            self._flush_trace(
+                result=result,
+                run_dir=run_dir,
+                started_at=started_at,
+                decision_calls_before=decision_calls_before,
+                decision_tokens_before=decision_tokens_before,
+                verify_calls_before=verify_calls_before,
+                verify_tokens_before=verify_tokens_before,
+            )
 
             if verify_result.get("task_completed", False):
                 result.success = True
+                self._flush_trace(
+                    result=result,
+                    run_dir=run_dir,
+                    started_at=started_at,
+                    decision_calls_before=decision_calls_before,
+                    decision_tokens_before=decision_tokens_before,
+                    verify_calls_before=verify_calls_before,
+                    verify_tokens_before=verify_tokens_before,
+                )
+                break
+            if verify_result.get("candidate_exhausted", False):
+                result.error = verify_result.get("candidate_failure_reason", "点击候选点均未命中目标")
+                self._flush_trace(
+                    result=result,
+                    run_dir=run_dir,
+                    started_at=started_at,
+                    decision_calls_before=decision_calls_before,
+                    decision_tokens_before=decision_tokens_before,
+                    verify_calls_before=verify_calls_before,
+                    verify_tokens_before=verify_tokens_before,
+                )
                 break
 
             guardrail_result = self.guardrail.check(
@@ -290,10 +374,28 @@ class VisionDecisionLoop:
                     "has_dialog": recovery_result.snapshot.has_dialog,
                     "actions": recovery_result.actions,
                 }
+                self._flush_trace(
+                    result=result,
+                    run_dir=run_dir,
+                    started_at=started_at,
+                    decision_calls_before=decision_calls_before,
+                    decision_tokens_before=decision_tokens_before,
+                    verify_calls_before=verify_calls_before,
+                    verify_tokens_before=verify_tokens_before,
+                )
                 if recovery_result.status == RecoveryStatus.HANDOFF:
                     result.handoff_required = True
                     result.handoff_reason = recovery_result.reason
                     result.error = recovery_result.reason
+                    self._flush_trace(
+                        result=result,
+                        run_dir=run_dir,
+                        started_at=started_at,
+                        decision_calls_before=decision_calls_before,
+                        decision_tokens_before=decision_tokens_before,
+                        verify_calls_before=verify_calls_before,
+                        verify_tokens_before=verify_tokens_before,
+                    )
                     break
                 if recovery_result.status == RecoveryStatus.NEED_REPLAN:
                     guardrail_result = GuardrailResult(
@@ -314,9 +416,27 @@ class VisionDecisionLoop:
                 if new_plan.get("feasible", False):
                     plan = new_plan
                     result.plan = new_plan
+                    self._flush_trace(
+                        result=result,
+                        run_dir=run_dir,
+                        started_at=started_at,
+                        decision_calls_before=decision_calls_before,
+                        decision_tokens_before=decision_tokens_before,
+                        verify_calls_before=verify_calls_before,
+                        verify_tokens_before=verify_tokens_before,
+                    )
                     logger.info("重规划成功: 已更新高层 preferred/fallback/transition")
                     continue
                 result.error = "重规划失败"
+                self._flush_trace(
+                    result=result,
+                    run_dir=run_dir,
+                    started_at=started_at,
+                    decision_calls_before=decision_calls_before,
+                    decision_tokens_before=decision_tokens_before,
+                    verify_calls_before=verify_calls_before,
+                    verify_tokens_before=verify_tokens_before,
+                )
                 break
         else:
             result.error = f"超过最大步数 {config.max_total_steps}"
@@ -337,6 +457,27 @@ class VisionDecisionLoop:
             f"{result.total_duration:.1f}s {result.error}"
         )
         return result
+
+    def _flush_trace(
+        self,
+        result: TaskResult,
+        run_dir: str,
+        started_at: float,
+        decision_calls_before: int,
+        decision_tokens_before: int,
+        verify_calls_before: int,
+        verify_tokens_before: int,
+    ) -> None:
+        result.total_duration = time.time() - started_at
+        result.vision_calls = (
+            self.decision_engine.stats["calls"] - decision_calls_before
+            + self.verifier.stats["calls"] - verify_calls_before
+        )
+        result.total_tokens = (
+            self.decision_engine.stats["total_tokens"] - decision_tokens_before
+            + self.verifier.stats["total_tokens"] - verify_tokens_before
+        )
+        self._save_trace(result, run_dir)
 
     def _observe_for_decision(self) -> FusedPerception:
         if self.next_capture_cache:
@@ -415,6 +556,7 @@ class VisionDecisionLoop:
         original_action: dict,
         enhanced_action: dict,
         target_description: str,
+        visual_target: dict,
         perception: FusedPerception,
     ) -> Optional[dict]:
         if enhanced_action.get("type") not in {"click", "double_click", "right_click"}:
@@ -433,7 +575,7 @@ class VisionDecisionLoop:
             details = ["模型未提供坐标，也没有可用于重新定位的目标描述"]
         elif not original_action.get("coordinate"):
             failure_source = "model_missing_coordinate_enhancer_unresolved"
-            details = ["模型未提供坐标，增强定位也未能找到可执行目标"]
+            details = ["模型未提供坐标，且一次辅助定位未能找到可执行目标"]
         else:
             failure_source = "unresolved_click_coordinate"
             details = ["当前 click 动作缺少可执行坐标"]
@@ -455,8 +597,151 @@ class VisionDecisionLoop:
             "failure_source": failure_source,
             "coordinate_source": coordinate_source,
             "target_name": target_description,
+            "visual_target": visual_target,
             "exec_skipped": True,
         }
+
+    def _execute_click_candidates(
+        self,
+        action: dict,
+        decision: dict,
+        plan: dict,
+        before_perception: FusedPerception,
+    ) -> tuple[dict, dict, bool, Optional[FusedPerception]]:
+        candidates = action.get("coordinate_candidates", []) or []
+        if not candidates and action.get("coordinate"):
+            candidates = [action.get("coordinate")]
+        if not candidates:
+            candidates = [None]
+
+        candidate_attempts: list[dict] = []
+        last_action = dict(action)
+        last_verify: Optional[dict] = None
+        last_after: Optional[FusedPerception] = None
+
+        for index, point in enumerate(candidates[:3], start=1):
+            candidate_action = dict(action)
+            if point is None:
+                candidate_action.pop("coordinate", None)
+                candidate_action["coordinate_candidates"] = []
+            else:
+                candidate_action["coordinate"] = point
+                candidate_action["coordinate_candidates"] = [p for p in candidates[:3] if p is not None]
+
+            enhanced_action = self.ax_enhancer.enhance(
+                vision_action=candidate_action,
+                target_description=decision.get("target_description", ""),
+                perception=before_perception,
+                visual_target=decision.get("visual_target", {}),
+            )
+            preflight = self._preflight_action(
+                original_action=candidate_action,
+                enhanced_action=enhanced_action,
+                target_description=decision.get("target_description", ""),
+                visual_target=decision.get("visual_target", {}),
+                perception=before_perception,
+            )
+            if preflight is not None:
+                preflight["candidate_index"] = index
+                candidate_attempts.append(
+                    {
+                        "candidate_index": index,
+                        "coordinate": point or [],
+                        "coordinate_source": enhanced_action.get("coordinate_source", "unknown"),
+                        "result": "preflight_failed",
+                    }
+                )
+                last_action = enhanced_action
+                last_verify = preflight
+                continue
+
+            exec_success = self.executor.execute(
+                enhanced_action,
+                before_perception.coord_system,
+            )
+            time.sleep(config.action_interval)
+            after_perception = self._observe_after_action()
+            verify_result = self.verifier.verify(
+                TransitionContext(
+                    task_goal=plan.get("goal", ""),
+                    plan=plan,
+                    action=enhanced_action,
+                    decision=decision,
+                    before_perception=before_perception,
+                    after_perception=after_perception,
+                    exec_success=exec_success,
+                )
+            )
+            verify_result["candidate_index"] = index
+            candidate_attempts.append(
+                {
+                        "candidate_index": index,
+                        "coordinate": point or [],
+                        "coordinate_source": enhanced_action.get("coordinate_source", "unknown"),
+                        "exec_success": exec_success,
+                        "state": verify_result.get("state", "unknown"),
+                    "step_completed": verify_result.get("step_completed", False),
+                    "task_completed": verify_result.get("task_completed", False),
+                    "progress_made": verify_result.get("progress_made", False),
+                }
+            )
+            last_action = enhanced_action
+            last_verify = verify_result
+            last_after = after_perception
+
+            if self._candidate_succeeded(verify_result):
+                verify_result["candidate_attempts"] = candidate_attempts
+                return enhanced_action, verify_result, exec_success, after_perception
+            if not self._should_try_next_candidate(verify_result, decision.get("current_page", "unknown")):
+                verify_result["candidate_attempts"] = candidate_attempts
+                return enhanced_action, verify_result, exec_success, after_perception
+
+        if last_verify is None:
+            last_verify = self._preflight_action(
+                original_action=action,
+                enhanced_action=last_action,
+                target_description=decision.get("target_description", ""),
+                visual_target=decision.get("visual_target", {}),
+                perception=before_perception,
+            ) or {
+                "state": "unknown",
+                "transition": "none",
+                "step_completed": False,
+                "task_completed": False,
+                "confidence": "low",
+                "evidence": ["缺少可执行点击候选点"],
+                "next_step_hint": "fail",
+                "status": "failed",
+                "details": ["缺少可执行点击候选点"],
+                "post_action_state": "click_not_executable",
+                "progress_made": False,
+                "template": "click_preflight",
+                "verification_level": "rule_guard",
+            }
+        last_verify["candidate_attempts"] = candidate_attempts
+        last_verify["candidate_exhausted"] = True
+        last_verify["candidate_failure_reason"] = "点击候选点均未命中目标"
+        last_verify["next_step_hint"] = "fail"
+        return last_action, last_verify, False, last_after
+
+    @staticmethod
+    def _candidate_succeeded(verify_result: dict) -> bool:
+        return bool(
+            verify_result.get("task_completed", False)
+            or verify_result.get("step_completed", False)
+            or verify_result.get("progress_made", False)
+        )
+
+    @staticmethod
+    def _should_try_next_candidate(verify_result: dict, before_state: str) -> bool:
+        state = str(verify_result.get("state", "unknown") or "unknown")
+        if verify_result.get("task_completed", False) or verify_result.get("step_completed", False):
+            return False
+        if verify_result.get("progress_made", False):
+            return False
+        if state not in {"unknown", "", before_state}:
+            return False
+        return True
 
     @staticmethod
     def _save_trace(result: TaskResult, run_dir: str) -> None:
@@ -490,5 +775,8 @@ class VisionDecisionLoop:
                 for s in result.steps
             ],
         }
-        with open(os.path.join(run_dir, "trace.json"), "w", encoding="utf-8") as file:
+        trace_path = os.path.join(run_dir, "trace.json")
+        temp_path = f"{trace_path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
+        os.replace(temp_path, trace_path)

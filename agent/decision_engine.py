@@ -63,6 +63,7 @@ DECISION_PROMPT = f"""你是 CUA-Lark 的视觉决策核心。
   "action": {{
     "type": "click|double_click|right_click|type|hotkey|scroll|wait|done|fail|pause_for_user",
     "coordinate": [x, y],
+    "coordinate_candidates": [[x1, y1], [x2, y2], [x3, y3]],
     "text": "",
     "keys": [],
     "direction": "up|down",
@@ -71,6 +72,11 @@ DECISION_PROMPT = f"""你是 CUA-Lark 的视觉决策核心。
     "reason": "动作理由"
   }},
   "target_description": "目标元素描述",
+  "visual_target": {{
+    "kind": "icon_button|text_button|input_box|list_item|nav_item|menu_item|unknown",
+    "anchor": "目标相对位置描述",
+    "confidence": "high|medium|low"
+  }},
   "confidence": "high|medium|low",
   "progress_percent": 0
 }}
@@ -166,6 +172,8 @@ class VisionDecisionEngine:
             payload.setdefault("confidence", "medium")
             payload.setdefault("progress_percent", 0)
             payload.setdefault("action", {"type": "wait", "seconds": 0.8, "reason": "缺少动作"})
+            payload["action"] = self._normalize_action(payload.get("action"))
+            payload["visual_target"] = self._normalize_visual_target(payload.get("visual_target"))
 
             self.history.extend(
                 [
@@ -187,6 +195,7 @@ class VisionDecisionEngine:
                                 "observation": payload.get("observation", ""),
                                 "current_page": payload.get("current_page", "unknown"),
                                 "action": payload.get("action", {}),
+                                "visual_target": payload.get("visual_target", {}),
                                 "confidence": payload.get("confidence", "medium"),
                             },
                             ensure_ascii=False,
@@ -216,9 +225,65 @@ class VisionDecisionEngine:
             "action": {
                 "type": "fail",
                 "reason": "当前环境缺少可用的视觉决策能力",
+                "coordinate_candidates": [],
             },
             "target_description": "",
+            "visual_target": {
+                "kind": "unknown",
+                "anchor": "",
+                "confidence": "low",
+            },
             "confidence": "low",
             "progress_percent": 0,
             "_tokens": 0,
         }
+
+    @staticmethod
+    def _normalize_visual_target(payload: Optional[dict]) -> dict:
+        target = payload if isinstance(payload, dict) else {}
+        return {
+            "kind": str(target.get("kind", "unknown") or "unknown"),
+            "anchor": str(target.get("anchor", "") or ""),
+            "confidence": str(target.get("confidence", "low") or "low"),
+        }
+
+    @staticmethod
+    def _normalize_action(payload: Optional[dict]) -> dict:
+        action = payload if isinstance(payload, dict) else {}
+        normalized = {
+            "type": str(action.get("type", "wait") or "wait"),
+            "text": action.get("text", "") or "",
+            "keys": action.get("keys", []) or [],
+            "direction": str(action.get("direction", "up") or "up"),
+            "amount": action.get("amount", 3),
+            "seconds": action.get("seconds", 1.0),
+            "reason": action.get("reason", "") or "",
+        }
+        coordinate = VisionDecisionEngine._normalize_point(action.get("coordinate"))
+        if coordinate:
+            normalized["coordinate"] = coordinate
+
+        candidates: list[list[int]] = []
+        raw_candidates = action.get("coordinate_candidates", [])
+        if isinstance(raw_candidates, list):
+            for item in raw_candidates[:3]:
+                point = VisionDecisionEngine._normalize_point(item)
+                if point and point not in candidates:
+                    candidates.append(point)
+        if coordinate and coordinate not in candidates:
+            candidates.insert(0, coordinate)
+        if candidates:
+            normalized["coordinate_candidates"] = candidates[:3]
+        else:
+            normalized["coordinate_candidates"] = []
+        return normalized
+
+    @staticmethod
+    def _normalize_point(value: object) -> Optional[list[int]]:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return None
+        try:
+            x, y = int(value[0]), int(value[1])
+        except Exception:
+            return None
+        return [x, y]
