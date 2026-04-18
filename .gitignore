@@ -1,2 +1,30 @@
 /CUA-Lark 方案设计：视觉驱动 × AX增强 × FSM护栏.md
-/__pycache__
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 编辑器配置
+.vscode/
+.idea/
+
+# 日志
+*.log
+
+# 依赖目录
+node_modules/
+vendor/
+
+# 构建产物
+dist/
+build/
+target/
+
+# 环境变量
+.env
+.env.local
+
+# 缓存
+.cache/
+__pycache__/
+*.pyc

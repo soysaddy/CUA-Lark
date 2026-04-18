@@ -1,7 +1,7 @@
 import base64
 import io
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Optional
 
 from PIL import Image
@@ -27,6 +27,7 @@ class FusedPerception:
     coord_system: Optional[CoordSystem] = None
     timestamp: float = 0.0
     capture_duration_ms: float = 0.0
+    perception_duration_ms: float = 0.0
     capture_source: str = "fresh"
     ax_enabled: bool = False
     som_enabled: bool = False
@@ -49,7 +50,8 @@ class PerceptionFusion:
         self.capturer = ScreenCapturer()
         self.ax = AXInspector()
         self.som = SoMAnnotator()
-        self._capture_usage: dict[int, int] = {}
+        self._active_capture_key: Optional[int] = None
+        self._capture_materialized = False
         self._perception_cache: dict[tuple[int, bool, bool], FusedPerception] = {}
 
     @staticmethod
@@ -64,7 +66,7 @@ class PerceptionFusion:
             return window_info["bounds"]
         return None
 
-    def perceive(self, with_som: bool = True, with_ax: bool = True) -> FusedPerception:
+    def perceive(self, with_som: bool = False, with_ax: bool = False) -> FusedPerception:
         screen_data, bounds = self.capture_screen()
         if not screen_data or not bounds:
             logger.error("截图失败")
@@ -80,6 +82,15 @@ class PerceptionFusion:
             with_ax=with_ax,
         )
 
+    def observe_light(self) -> FusedPerception:
+        return self.perceive(with_som=False, with_ax=False)
+
+    def observe_structured(self) -> FusedPerception:
+        return self.perceive(with_som=False, with_ax=True)
+
+    def observe_annotated(self) -> FusedPerception:
+        return self.perceive(with_som=True, with_ax=True)
+
     def capture_screen(self, bounds: Optional[dict] = None) -> tuple[Optional[dict], Optional[dict]]:
         capture_bounds = bounds or self._get_bounds()
         if not capture_bounds:
@@ -87,10 +98,10 @@ class PerceptionFusion:
             return None, None
         screen_data = self.capturer.capture_lark_window(capture_bounds)
         if screen_data:
-            screen_data["capture_source"] = "fresh"
             capture_key = self._capture_key(screen_data)
-            self._capture_usage[capture_key] = 0
-            self._prune_caches()
+            self._active_capture_key = capture_key
+            self._capture_materialized = False
+            self._perception_cache.clear()
         return screen_data, capture_bounds
 
     def perceive_from_capture(
@@ -102,25 +113,30 @@ class PerceptionFusion:
     ) -> FusedPerception:
         started_at = time.time()
         capture_key = self._capture_key(screen_data)
+        if capture_key != self._active_capture_key:
+            self._active_capture_key = capture_key
+            self._capture_materialized = False
+            self._perception_cache.clear()
         cache_key = (capture_key, with_ax, with_som)
         cached = self._perception_cache.get(cache_key)
         if cached:
-            return replace(
+            return self._clone_perception(
                 cached,
                 capture_source="reused",
                 capture_duration_ms=screen_data.get("capture_duration_ms", cached.capture_duration_ms),
-                timestamp=time.time(),
+                perception_duration_ms=0.0,
             )
 
-        usage_count = self._capture_usage.get(capture_key, 0)
-        self._capture_usage[capture_key] = usage_count + 1
+        capture_source = "fresh" if not self._capture_materialized else "reused"
+        self._capture_materialized = True
         result = FusedPerception(
             screenshot=Image.new("RGB", (1, 1)),
             screenshot_b64="",
             timestamp=time.time(),
-            capture_source="fresh" if usage_count == 0 else "reused",
+            capture_source=capture_source,
             ax_enabled=with_ax,
             som_enabled=False,
+            capture_duration_ms=screen_data.get("capture_duration_ms", 0.0),
         )
 
         result.screenshot = screen_data["image"]
@@ -154,24 +170,46 @@ class PerceptionFusion:
             raw_size=screen_data["raw_size"],
             resized_size=screen_data.get("resized_size", result.screenshot.size),
         )
-        result.capture_duration_ms = (time.time() - started_at) * 1000
+        result.perception_duration_ms = (time.time() - started_at) * 1000
         self._perception_cache[cache_key] = result
-        self._prune_caches()
-        return result
+        return self._clone_perception(
+            result,
+            capture_source=result.capture_source,
+            capture_duration_ms=result.capture_duration_ms,
+            perception_duration_ms=result.perception_duration_ms,
+        )
 
     @staticmethod
     def _capture_key(screen_data: dict) -> int:
+        # 这里只是“同一 capture 对象”的复用键，不是内容级缓存，也不是跨截图缓存。
         return id(screen_data)
 
-    def _prune_caches(self) -> None:
-        while len(self._capture_usage) > 8:
-            oldest = next(iter(self._capture_usage))
-            self._capture_usage.pop(oldest, None)
-            stale_keys = [key for key in self._perception_cache if key[0] == oldest]
-            for stale_key in stale_keys:
-                self._perception_cache.pop(stale_key, None)
-        while len(self._perception_cache) > 12:
-            self._perception_cache.pop(next(iter(self._perception_cache)), None)
+    @staticmethod
+    def _clone_perception(
+        perception: FusedPerception,
+        *,
+        capture_source: str,
+        capture_duration_ms: float,
+        perception_duration_ms: float,
+    ) -> FusedPerception:
+        # Image / coord_system 在当前链路按只读对象使用；这里复制可变元数据，避免调用方污染缓存对象。
+        return FusedPerception(
+            screenshot=perception.screenshot,
+            screenshot_b64=perception.screenshot_b64,
+            annotated_screenshot=perception.annotated_screenshot,
+            _annotated_b64=perception._annotated_b64,
+            ax_summary=perception.ax_summary,
+            ax_elements=list(perception.ax_elements),
+            som_marks=list(perception.som_marks),
+            som_description=perception.som_description,
+            coord_system=perception.coord_system,
+            timestamp=time.time(),
+            capture_duration_ms=capture_duration_ms,
+            perception_duration_ms=perception_duration_ms,
+            capture_source=capture_source,
+            ax_enabled=perception.ax_enabled,
+            som_enabled=perception.som_enabled,
+        )
 
     @staticmethod
     def _build_ax_summary(elements: list[AXElement]) -> str:

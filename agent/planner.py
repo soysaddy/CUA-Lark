@@ -4,6 +4,10 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from agent.state_schema import (
+    build_expected_transition,
+    normalize_expected_transition,
+)
 from config import config
 from knowledge.lark_capabilities import LARK_CAPABILITIES, LARK_COMMON_PATTERNS
 from utils.openai_client import create_openai_client
@@ -22,14 +26,8 @@ class VisionPlanner:
         if self.client:
             result = self._plan_with_openai(task_text, current_screenshot_b64)
             if result:
-                return self._apply_task_strategies(
-                    task_text,
-                    self._normalize_plan(result),
-                )
-        return self._apply_task_strategies(
-            task_text,
-            self._normalize_plan(self._fallback_plan(task_text)),
-        )
+                return self._normalize_plan(task_text, result)
+        return self._normalize_plan(task_text, self._fallback_plan(task_text))
 
     def replan(
         self,
@@ -38,48 +36,30 @@ class VisionPlanner:
         current_screenshot_b64: str,
         issue: str,
     ) -> dict[str, Any]:
-        task_text = original_plan.get("goal", "") or issue
+        task_text = str(original_plan.get("goal") or issue or "").strip()
         if self.client:
             result = self._replan_with_openai(
-                original_plan, current_step, current_screenshot_b64, issue
+                original_plan=original_plan,
+                current_screenshot_b64=current_screenshot_b64,
+                issue=issue,
             )
             if result:
-                return self._apply_task_strategies(
-                    task_text,
-                    self._normalize_plan(result),
-                )
-        steps = (
-            original_plan.get("steps", [])[current_step:]
-            or original_plan.get("steps", [])
-        )
-        return self._apply_task_strategies(
-            task_text,
-            self._normalize_plan(
-            {
-                "feasible": bool(steps),
-                "confidence": "low",
-                "goal": task_text,
-                "steps": steps,
-                "reasoning": "基于原计划降级重规划",
-                "risk_notes": issue,
-            }
-            ),
-        )
+                return self._normalize_plan(task_text, result)
+        return self._normalize_plan(task_text, self._fallback_plan(task_text))
 
     def _plan_with_openai(
         self,
         user_input: str,
-        current_screenshot_b64: Optional[str] = None,
+        current_screenshot_b64: Optional[str],
     ) -> Optional[dict[str, Any]]:
         try:
-            user_parts: list[dict] = [
+            user_parts: list[dict[str, Any]] = [
                 {
                     "type": "text",
                     "text": (
-                        f"用户指令: {user_input}\n\n"
-                        "请根据当前飞书界面截图，规划具体可执行的步骤。\n"
-                        "每个步骤应该是一个具体的 GUI 操作（点击某个按钮、输入文字等）。\n"
-                        "请直接返回 json。"
+                        f"用户任务: {user_input}\n\n"
+                        "请只输出高层计划，不要写死执行步骤，不要输出具体点击细节。\n"
+                        "返回严格 json。"
                     ),
                 }
             ]
@@ -100,24 +80,26 @@ class VisionPlanner:
                     {
                         "role": "system",
                         "content": (
-                            "你是飞书桌面端任务规划器。\n\n"
+                            "你是飞书桌面端高层任务规划器。\n"
+                            "你只负责给出目标、首选路径、备选路径、期望状态迁移，不负责写死执行步骤。\n\n"
                             f"{LARK_CAPABILITIES}\n\n{LARK_COMMON_PATTERNS}\n\n"
-                            "## 规划原则\n"
-                            "1. 观察当前截图，但不要过度相信单次截图；如果状态不确定，优先产出稳健 fallback 链路\n"
-                            "2. 规划从当前状态到目标的最短路径，但不要过早替执行层做决定\n"
-                            "3. 每步应描述目标状态迁移和候选策略，不必把所有 fallback 写成固定点击路径\n"
-                            "4. 飞书左侧导航栏有：消息、视频会议、日历、云文档、邮箱 等入口\n"
-                            "5. 如果目标页面已经显示在当前截图中，步骤可以很少；消息场景可表达 preferred_path 和 fallback_path\n"
-                            "6. 优先使用以下 step type: module_navigation, list_item_open, search_open, search_select, input\n"
-                            "7. success_signal 只需描述结构化目标，例如 {target_page,target_name,expected_transition}\n"
-                            "8. 消息任务可在 plan 顶层补充 preferred_path / fallback_path / expected_transition，而不是把整条固定路径写死\n\n"
-                            "请输出 json: {feasible, confidence, goal, preferred_path?, fallback_path?, expected_transition?, steps[], reasoning, risk_notes}\n"
-                            "steps 中每个元素: {id, description, type, success_signal}"
+                            "请输出 json: "
+                            "{feasible, confidence, goal, preferred_path, fallback_path, expected_transition, reasoning, risk_notes}\n"
+                            "要求:\n"
+                            "1. preferred_path / fallback_path 是高层候选路径，不是固定脚本\n"
+                            "2. expected_transition 用结构化 json，"
+                            "其中 to / target_page 应使用系统当前一致的 canonical page/state id；"
+                            "例如可写成 "
+                            '{"from":"current","to":"im_chat","target_page":"im_chat","target_name":"大群","text":"进入目标会话"}，'
+                            "但这只是示例，不是写死模板\n"
+                            "3. 不要输出 steps，不要替执行层决定具体点哪里\n"
+                            "4. 可以参考当前截图，但不要过度相信单次截图\n"
+                            "5. 请直接返回 json"
                         ),
                     },
                     {"role": "user", "content": user_parts},
                 ],
-                max_tokens=1200,
+                max_tokens=900,
                 temperature=0.2,
                 response_format={"type": "json_object"},
             )
@@ -129,7 +111,6 @@ class VisionPlanner:
     def _replan_with_openai(
         self,
         original_plan: dict,
-        current_step: int,
         current_screenshot_b64: str,
         issue: str,
     ) -> Optional[dict[str, Any]]:
@@ -140,12 +121,12 @@ class VisionPlanner:
                     {
                         "role": "system",
                         "content": (
-                            "你是飞书桌面端任务规划器。原计划执行遇阻，"
-                            "请根据当前界面重新规划剩余步骤。\n"
+                            "你是飞书桌面端高层任务规划器。\n"
+                            "当前执行遇阻，请在不写死执行细节的前提下，更新高层 preferred_path / fallback_path / expected_transition。\n"
                             f"原计划: {json.dumps(original_plan, ensure_ascii=False)}\n"
-                            f"已完成到步骤索引: {current_step}\n"
-                            f"遇到的问题: {issue}\n"
-                            "请直接返回 json。"
+                            f"问题: {issue}\n"
+                            "expected_transition 的 to / target_page 请继续使用系统当前一致的 canonical page/state id。\n"
+                            "请只返回 json。"
                         ),
                     },
                     {
@@ -153,494 +134,237 @@ class VisionPlanner:
                         "content": [
                             {
                                 "type": "text",
-                                "text": "当前飞书界面截图，请重新规划。",
+                                "text": "当前截图供你更新高层策略，请直接返回 json。",
                             },
                             {
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/png;base64,{current_screenshot_b64}",
-                                    "detail": "high",
+                                    "detail": "low",
                                 },
                             },
                         ],
                     },
                 ],
-                max_tokens=1000,
+                max_tokens=900,
                 temperature=0.2,
                 response_format={"type": "json_object"},
             )
             return json.loads(response.choices[0].message.content)
         except Exception as exc:
-            logger.warning(f"重规划失败: {exc}")
+            logger.warning(f"重规划失败，降级高层策略规划: {exc}")
             return None
 
-    def _fallback_plan(self, user_input: str) -> dict[str, Any]:
-        text = user_input.strip()
-
-        message_target = self._extract_message_target(text)
-        if self._looks_like_message_open_task(text) and message_target:
-            return self._build_message_open_plan(text, message_target)
-
-        # ── 发消息 ──
-        send_match = re.search(
-            r"(给|发.*给|告诉)(?P<contact>[^：:，, ]+).*[：:](?P<message>.+)$",
-            text,
+    @staticmethod
+    def _normalize_plan(task_text: str, raw_plan: dict[str, Any]) -> dict[str, Any]:
+        goal = str(raw_plan.get("goal") or task_text).strip()
+        preferred_path = str(raw_plan.get("preferred_path") or "").strip()
+        fallback_path = str(raw_plan.get("fallback_path") or "").strip()
+        expected_transition = normalize_expected_transition(
+            raw_plan.get("expected_transition"),
+            fallback_text=goal,
         )
-        if send_match:
-            contact = send_match.group("contact")
-            message = send_match.group("message").strip()
+        normalized = {
+            "feasible": bool(raw_plan.get("feasible", True)),
+            "confidence": raw_plan.get("confidence", "medium"),
+            "goal": goal,
+            "preferred_path": preferred_path,
+            "fallback_path": fallback_path,
+            "expected_transition": expected_transition,
+            "reasoning": str(raw_plan.get("reasoning") or "").strip(),
+            "risk_notes": raw_plan.get("risk_notes") or "",
+        }
+        return VisionPlanner._apply_task_strategies(task_text, normalized)
+
+    @staticmethod
+    def _apply_task_strategies(task_text: str, plan: dict[str, Any]) -> dict[str, Any]:
+        target_name = VisionPlanner._extract_target_name(task_text)
+        target_page = VisionPlanner._infer_target_page(task_text)
+        updated = dict(plan)
+
+        if VisionPlanner._looks_like_message_open_task(task_text):
+            if not updated.get("goal"):
+                updated["goal"] = (
+                f"打开目标会话「{target_name}」" if target_name else task_text
+                )
+            if not updated.get("preferred_path"):
+                updated["preferred_path"] = (
+                "优先利用当前可见的消息列表、已打开聊天或消息模块中的直接入口到达目标会话"
+                )
+            if not updated.get("fallback_path"):
+                updated["fallback_path"] = (
+                "如果列表中不可见或当前不在消息模块，则先进入消息模块，再通过搜索定位目标会话"
+                )
+            if updated["expected_transition"].get("target_page") == "unknown":
+                updated["expected_transition"] = build_expected_transition(
+                    to_page="im_chat",
+                    from_page="current",
+                    target_name=target_name,
+                    text="打开目标会话",
+                )
+            elif target_name and not updated["expected_transition"].get("target_name"):
+                updated["expected_transition"]["target_name"] = target_name
+            return updated
+
+        if target_page != "unknown":
+            if not updated.get("preferred_path"):
+                updated["preferred_path"] = VisionPlanner._default_preferred_path(target_page)
+            if not updated.get("fallback_path"):
+                updated["fallback_path"] = VisionPlanner._default_fallback_path(target_page)
+            if updated["expected_transition"].get("target_page") == "unknown":
+                updated["expected_transition"] = build_expected_transition(
+                    to_page=target_page,
+                    from_page="current",
+                    target_name=target_name,
+                    text=task_text,
+                )
+            elif target_name and not updated["expected_transition"].get("target_name"):
+                updated["expected_transition"]["target_name"] = target_name
+            return updated
+
+        return plan
+
+    @staticmethod
+    def _fallback_plan(task_text: str) -> dict[str, Any]:
+        target_name = VisionPlanner._extract_target_name(task_text)
+        target_page = VisionPlanner._infer_target_page(task_text)
+
+        if VisionPlanner._looks_like_message_open_task(task_text):
             return {
                 "feasible": True,
                 "confidence": "medium",
-                "goal": f"向{contact}发送消息：{message}",
-                "steps": [
-                    {
-                        "id": 1,
-                        "description": "打开飞书全局搜索",
-                        "type": "search_open",
-                        "success_signal": "搜索框已打开",
-                    },
-                    {
-                        "id": 2,
-                        "description": f"搜索联系人{contact}",
-                        "type": "input",
-                        "success_signal": f"搜索结果中出现{contact}",
-                    },
-                    {
-                        "id": 3,
-                        "description": f"点击联系人{contact}",
-                        "type": "search_select",
-                        "success_signal": f"进入与{contact}的聊天",
-                    },
-                    {
-                        "id": 4,
-                        "description": f"输入消息{message}",
-                        "type": "input",
-                        "success_signal": "消息已输入到输入框",
-                    },
-                    {
-                        "id": 5,
-                        "description": "按回车发送消息",
-                        "type": "input",
-                        "success_signal": f"消息{message}已出现在聊天中",
-                    },
-                ],
-                "reasoning": "标准发消息流程",
-                "risk_notes": "联系人搜索结果可能不唯一",
+                "goal": f"打开目标会话「{target_name}」" if target_name else task_text,
+                "preferred_path": "优先在当前可见的消息列表、已打开聊天或消息模块中直达目标会话",
+                "fallback_path": "如果列表中不可见或当前不在消息模块，则先进入消息模块，再通过搜索定位目标会话",
+                "expected_transition": build_expected_transition(
+                    to_page="im_chat",
+                    from_page="current",
+                    target_name=target_name,
+                    text="打开目标会话",
+                ),
+                "reasoning": "消息打开类任务适合由执行层结合当前视觉状态，优先走列表直达，必要时转搜索。",
+                "risk_notes": "目标会话可能当前不可见，执行时需结合列表可见性决定是否转搜索。",
             }
 
-        # ── 查看/浏览文档 ──
-        if any(kw in text for kw in ("查看", "浏览", "打开")) and "文档" in text:
+        if "发送" in task_text and target_name:
             return {
                 "feasible": True,
                 "confidence": "medium",
-                "goal": text,
-                "steps": [
-                    {
-                        "id": 1,
-                        "description": "点击左侧导航栏的「云文档」图标",
-                        "type": "module_navigation",
-                        "success_signal": "云文档主页已显示",
-                    },
-                ],
-                "reasoning": "查看文档只需切换到文档模块",
-                "risk_notes": "导航栏图标位置可能因版本不同而变化",
+                "goal": task_text,
+                "preferred_path": "若当前已在目标会话，则直接输入并发送；否则先定位目标会话",
+                "fallback_path": "通过搜索定位目标会话后输入并发送消息",
+                "expected_transition": build_expected_transition(
+                    to_page="im_chat",
+                    from_page="current",
+                    target_name=target_name,
+                    text="进入目标会话并发送消息",
+                ),
+                "reasoning": "发送消息前需要先确保已定位到目标会话。",
+                "risk_notes": "搜索结果可能同名，需要执行层结合当前截图选择正确会话。",
             }
 
-        # ── 创建文档 ──
-        if any(kw in text for kw in ("新建", "创建", "写")) and "文档" in text:
+        if target_page != "unknown":
             return {
                 "feasible": True,
-                "confidence": "low",
-                "goal": text,
-                "steps": [
-                    {
-                        "id": 1,
-                        "description": "点击左侧导航栏的「云文档」图标",
-                        "type": "module_navigation",
-                        "success_signal": "已进入文档页",
-                    },
-                    {
-                        "id": 2,
-                        "description": "打开新建文档入口",
-                        "type": "list_item_open",
-                        "success_signal": "已打开文档编辑页",
-                    },
-                    {
-                        "id": 3,
-                        "description": "输入标题和内容",
-                        "type": "input",
-                        "success_signal": "文档内容显示正确",
-                    },
-                ],
-                "reasoning": "创建文档流程",
-                "risk_notes": "新建按钮可能因版本不同而变化",
-            }
-
-        # ── 日历/会议 ──
-        if any(kw in text for kw in ("会议", "日历", "评审会", "日程")):
-            return {
-                "feasible": True,
-                "confidence": "low",
-                "goal": text,
-                "steps": [
-                    {
-                        "id": 1,
-                        "description": "点击左侧导航栏的「日历」图标",
-                        "type": "module_navigation",
-                        "success_signal": "已进入日历页",
-                    },
-                    {
-                        "id": 2,
-                        "description": "打开新建日程",
-                        "type": "list_item_open",
-                        "success_signal": "新建日程表单已出现",
-                    },
-                    {
-                        "id": 3,
-                        "description": "填写会议信息并保存",
-                        "type": "input",
-                        "success_signal": "日历中出现新事件",
-                    },
-                ],
-                "reasoning": "日历建会流程",
-                "risk_notes": "时间和参与人需要精细视觉判断",
+                "confidence": "medium",
+                "goal": task_text,
+                "preferred_path": VisionPlanner._default_preferred_path(target_page),
+                "fallback_path": VisionPlanner._default_fallback_path(target_page),
+                "expected_transition": build_expected_transition(
+                    to_page=target_page,
+                    from_page="current",
+                    target_name=target_name,
+                    text=task_text,
+                ),
+                "reasoning": "该任务以页面/模块切换为主，执行层应结合当前截图自主决定具体入口。",
+                "risk_notes": "界面版本差异可能导致入口位置变化，执行时应以当前可见 UI 为准。",
             }
 
         return {
             "feasible": False,
             "confidence": "low",
-            "goal": text,
-            "steps": [],
-            "reasoning": "超出当前能力范围或无法稳定拆解",
-            "risk_notes": "请将任务限制在消息、日历、文档场景内",
+            "goal": task_text,
+            "preferred_path": "",
+            "fallback_path": "",
+            "expected_transition": build_expected_transition(
+                to_page="unknown",
+                from_page="current",
+                text=task_text,
+            ),
+            "reasoning": "无法从任务文本中稳定抽出可执行的高层目标。",
+            "risk_notes": "请将任务描述限制在飞书客户端内的消息、日历、云文档等场景。",
         }
-
-    @staticmethod
-    def _normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
-        steps = []
-        for index, raw_step in enumerate(plan.get("steps", []), start=1):
-            if not isinstance(raw_step, dict):
-                raw_step = {"description": str(raw_step)}
-
-            description = (
-                raw_step.get("description")
-                or raw_step.get("step")
-                or raw_step.get("action")
-                or raw_step.get("name")
-                or f"步骤 {index}"
-            )
-            step_type = (
-                raw_step.get("type")
-                or VisionPlanner._infer_step_type(description)
-            )
-            success_signal = VisionPlanner._normalize_success_signal(
-                raw_step.get("success_signal")
-                or raw_step.get("expected")
-                or description,
-                step_type,
-                description,
-            )
-            step = {
-                key: value
-                for key, value in dict(raw_step).items()
-                if key not in {"when", "fallback"}
-            }
-            step.update(
-                {
-                    "id": raw_step.get("id", index),
-                    "description": description,
-                    "type": step_type,
-                    "success_signal": success_signal,
-                }
-            )
-            steps.append(step)
-
-        normalized = dict(plan)
-        normalized["steps"] = steps
-        return normalized
-
-    @staticmethod
-    def _infer_step_type(description: str) -> str:
-        if "搜索结果" in description:
-            return "search_select"
-        if any(
-            kw in description
-            for kw in (
-                "左侧导航", "导航栏", "侧边栏", "模块", "消息入口",
-                "云文档入口", "日历入口", "切到消息", "切到云文档",
-                "切到日历", "消息页", "云文档页", "日历页",
-            )
-        ):
-            return "module_navigation"
-        if any(kw in description for kw in ("打开搜索", "全局搜索", "搜索框", "搜索浮层")):
-            return "search_open"
-        if any(kw in description for kw in ("输入", "填写", "粘贴")):
-            return "input"
-        if any(kw in description for kw in ("会话", "群聊", "聊天", "联系人")) and any(
-            kw in description for kw in ("点击", "打开", "进入")
-        ):
-            return "list_item_open"
-        if any(kw in description for kw in ("点击", "打开", "进入", "切换")):
-            return "module_navigation"
-        if any(kw in description for kw in ("确认", "验证", "检查")):
-            return "verify"
-        return "module_navigation"
-
-    @staticmethod
-    def _normalize_success_signal(
-        signal: Any,
-        step_type: str,
-        description: str,
-    ) -> Any:
-        if isinstance(signal, dict):
-            return signal
-
-        text = str(signal or description)
-        target = VisionPlanner._extract_message_target(description) or VisionPlanner._extract_message_target(text)
-        page = VisionPlanner._infer_page_from_text(text) or VisionPlanner._infer_page_from_text(description)
-
-        if step_type == "module_navigation":
-            return {
-                "target_page": page or "unknown",
-                "expected_transition": VisionPlanner._make_expected_transition(
-                    to_page=page or "unknown",
-                ),
-                "text": text,
-            }
-        if step_type == "list_item_open":
-            return {
-                "target_page": "im_chat",
-                "target_name": target,
-                "expected_transition": VisionPlanner._make_expected_transition(
-                    from_page="im_main",
-                    to_page="im_chat",
-                    target_name=target,
-                ),
-                "text": text,
-            }
-        if step_type == "search_open":
-            return {
-                "target_page": "search",
-                "expected_transition": VisionPlanner._make_expected_transition(
-                    to_page="search",
-                ),
-                "text": text,
-            }
-        if step_type == "search_select":
-            return {
-                "target_page": "im_chat",
-                "target_name": target,
-                "expected_transition": VisionPlanner._make_expected_transition(
-                    from_page="search",
-                    to_page="im_chat",
-                    target_name=target,
-                ),
-                "text": text,
-            }
-        if step_type == "input":
-            return {
-                "target_name": target,
-                "expected_transition": VisionPlanner._make_expected_transition(
-                    from_page="input",
-                    to_page="input_updated",
-                    target_name=target,
-                ),
-                "text": text,
-            }
-        return text
-
-    @staticmethod
-    def _make_expected_transition(
-        to_page: str,
-        from_page: str = "current",
-        target_name: str = "",
-    ) -> dict[str, str]:
-        return {
-            "from": from_page,
-            "to": to_page,
-            "target_page": to_page,
-            "target_name": target_name,
-        }
-
-    @staticmethod
-    def _apply_task_strategies(task_text: str, plan: dict[str, Any]) -> dict[str, Any]:
-        target = VisionPlanner._extract_message_target(task_text)
-        if VisionPlanner._looks_like_message_open_task(task_text) and target:
-            return VisionPlanner._build_message_open_plan(task_text, target, existing=plan)
-        return plan
 
     @staticmethod
     def _looks_like_message_open_task(text: str) -> bool:
-        target = VisionPlanner._extract_message_target(text)
         has_open_verb = any(
             keyword in text for keyword in ("查看", "进入", "打开", "定位", "切到", "切换到", "找", "找到")
         )
         has_chat_object = any(
             keyword in text for keyword in ("消息", "群", "群聊", "会话", "聊天", "私聊", "对话")
         )
+        has_target = bool(VisionPlanner._extract_target_name(text))
         has_non_message_module = any(
             keyword in text for keyword in ("云文档", "文档", "日历", "会议", "邮箱")
         )
-        return has_open_verb and (has_chat_object or (bool(target) and not has_non_message_module))
+        return has_open_verb and (has_chat_object or has_target) and not has_non_message_module
 
     @staticmethod
-    def _build_message_open_plan(
-        task_text: str,
-        target: str,
-        existing: Optional[dict[str, Any]] = None,
-    ) -> dict[str, Any]:
-        plan = dict(existing or {})
-        plan["feasible"] = True
-        plan["goal"] = plan.get("goal") or f"打开目标会话「{target}」"
-        plan.setdefault("task_kind", "message_open")
-        plan.setdefault("preferred_path", "列表直达")
-        plan.setdefault("fallback_path", "搜索定位")
-        plan.setdefault(
-            "expected_transition",
-            VisionPlanner._make_expected_transition(
-                from_page="im_main",
-                to_page="im_chat",
-                target_name=target,
-            ),
-        )
-        steps = [
-            VisionPlanner._enrich_message_step(step, target)
-            for step in plan.get("steps", [])
-        ]
-        if not steps:
-            steps = [
-                {
-                    "id": 1,
-                    "description": f"打开目标会话「{target}」",
-                    "type": "list_item_open",
-                    "success_signal": {
-                        "target_page": "im_chat",
-                        "target_name": target,
-                        "expected_transition": VisionPlanner._make_expected_transition(
-                            from_page="im_main",
-                            to_page="im_chat",
-                            target_name=target,
-                        ),
-                        "text": f"已进入「{target}」聊天页",
-                    },
-                }
-            ]
-        plan["steps"] = steps
-        plan["reasoning"] = (
-            plan.get("reasoning")
-            or "消息会话任务保留首选路径和备选路径，由执行层根据当前状态决定走列表直达还是搜索定位。"
-        )
-        risk_notes = plan.get("risk_notes") or []
-        if isinstance(risk_notes, str):
-            risk_notes = [risk_notes]
-        if "单次截图可能看不到完整会话列表，因此保留搜索 fallback。" not in risk_notes:
-            risk_notes.append("单次截图可能看不到完整会话列表，因此保留搜索 fallback。")
-        plan["risk_notes"] = risk_notes
-        return VisionPlanner._normalize_plan(plan)
-
-    @staticmethod
-    def _enrich_message_step(step: dict[str, Any], target: str) -> dict[str, Any]:
-        enriched = dict(step)
-        description = str(enriched.get("description", "") or "")
-        step_type = str(enriched.get("type", "") or "")
-        signal = enriched.get("success_signal")
-
-        if step_type == "module_navigation":
-            enriched.setdefault("preferred_path", "左侧导航切换")
-        elif step_type == "list_item_open":
-            enriched.setdefault("preferred_path", "列表直达")
-            enriched.setdefault("fallback_path", "搜索定位")
-        elif step_type in {"search_open", "search_select"}:
-            enriched.setdefault("preferred_path", "搜索定位")
-
-        if step_type in {"list_item_open", "search_select"}:
-            current_target = ""
-            if isinstance(signal, dict):
-                current_target = str(
-                    signal.get("target_name", "") or signal.get("target", "") or ""
-                ).strip()
-            if (not isinstance(signal, dict)) or not VisionPlanner._is_valid_message_target(current_target):
-                signal_text = (
-                    str(signal.get("text", "") or description)
-                    if isinstance(signal, dict)
-                    else str(signal or description or f"已进入「{target}」聊天页")
-                )
-                enriched["success_signal"] = {
-                    "target_page": "im_chat",
-                    "target_name": target,
-                    "expected_transition": VisionPlanner._make_expected_transition(
-                        from_page=(
-                            "search"
-                            if step_type == "search_select"
-                            else "im_main"
-                        ),
-                        to_page="im_chat",
-                        target_name=target,
-                    ),
-                    "text": signal_text,
-                }
-        elif step_type == "module_navigation" and not isinstance(signal, dict):
-            enriched["success_signal"] = {
-                "target_page": "im_main",
-                "expected_transition": VisionPlanner._make_expected_transition(
-                    to_page="im_main",
-                ),
-                "text": str(signal or description or "消息页已打开"),
-            }
-        return enriched
-
-    @staticmethod
-    def _extract_message_target(text: str) -> str:
-        if not text:
-            return ""
-        for pattern in (
-            r"[「“\"]([^」”\"]{1,20})[」”\"]",
-            r"名为[「“\"]?([^」”\"，。:：\s]{1,20})",
-            r"(?:打开|切到|切换到|进入|定位|找|找到)([^，。:：\s]{1,20})(?:群聊|聊天|会话)",
-            r"进入([^\s，。、“”\"'「」『』]{1,20})(?:群聊|会话|聊天)",
-            r"查看消息[-:： ]+([^\s，。、“”\"'「」『』]{1,20})",
-            r"(?:打开|切到|切换到|进入|找|找到|定位)([^\s，。、“”\"'「」『』]{1,20})$",
-        ):
-            match = re.search(pattern, text)
-            if match:
-                candidate = match.group(1).strip()
-                if VisionPlanner._is_valid_message_target(candidate):
-                    return candidate
-        return ""
-
-    @staticmethod
-    def _is_valid_message_target(candidate: str) -> bool:
-        if not candidate or len(candidate) > 20:
-            return False
-        invalid_parts = (
-            "消息界面",
-            "界面并进入名为",
-            "聊天页",
-            "群聊",
-            "会话",
-            "目标",
-            "搜索",
-            "列表",
-            "结果",
-            "云文档",
-            "文档",
-            "日历",
-            "会议",
-            "邮箱",
-        )
-        return not any(part in candidate for part in invalid_parts)
-
-    @staticmethod
-    def _infer_page_from_text(text: str) -> str:
-        if any(keyword in text for keyword in ("消息页", "消息界面", "会话列表")):
-            return "im_main"
-        if any(keyword in text for keyword in ("聊天页", "群聊", "会话")):
-            return "im_chat"
-        if "云文档" in text:
+    def _infer_target_page(text: str) -> str:
+        source = str(text or "")
+        if any(keyword in source for keyword in ("云文档", "文档")):
             return "docs"
-        if any(keyword in text for keyword in ("日历", "日程")):
+        if any(keyword in source for keyword in ("日历", "日程", "会议")):
             return "calendar"
-        if any(keyword in text for keyword in ("搜索框", "搜索浮层", "全局搜索")):
+        if any(keyword in source for keyword in ("搜索", "查找")):
             return "search"
+        if any(keyword in source for keyword in ("聊天", "群聊", "会话", "私聊", "对话")):
+            return "im_chat"
+        if any(keyword in source for keyword in ("消息", "消息页", "消息界面", "消息模块", "会话列表")):
+            return "im_main"
+        return "unknown"
+
+    @staticmethod
+    def _extract_target_name(text: str) -> str:
+        source = str(text or "").strip()
+        if not source:
+            return ""
+        quote_match = re.search(r"[「“\"]([^」”\"]{1,40})[」”\"]", source)
+        if quote_match:
+            return quote_match.group(1).strip()
+
+        patterns = [
+            r"(?:打开|进入|切到|切换到|找到|找|查看)\s*([^，。,:：]{1,24})(?:群聊|聊天|会话|对话)",
+            r"(?:给|向)\s*([^，。,:：]{1,24})\s*(?:发消息|发送消息)",
+            r"(?:给|向)\s*([^，。,:：]{1,24})\s*[：:]",
+            r"名为\s*([^，。,:：]{1,24})",
+        ]
+        invalid = {"消息", "消息界面", "消息页", "云文档", "文档", "日历", "搜索"}
+        for pattern in patterns:
+            match = re.search(pattern, source)
+            if not match:
+                continue
+            candidate = match.group(1).strip("「」“”\"' ")
+            if candidate and candidate not in invalid:
+                return candidate
         return ""
+
+    @staticmethod
+    def _default_preferred_path(target_page: str) -> str:
+        if target_page == "calendar":
+            return "优先使用当前可见的左侧导航或稳定入口切换到日历模块"
+        if target_page == "docs":
+            return "优先使用当前可见的左侧导航或稳定入口切换到云文档模块"
+        if target_page == "search":
+            return "优先聚焦飞书搜索入口并打开搜索层"
+        if target_page == "im_main":
+            return "优先切换到消息模块并确认会话列表可见"
+        return "优先利用当前界面上最直接、最稳定的入口到达目标状态"
+
+    @staticmethod
+    def _default_fallback_path(target_page: str) -> str:
+        if target_page in {"calendar", "docs", "im_main"}:
+            return "若直接入口不可见或未响应，可改用搜索或稳定快捷方式进入目标模块"
+        if target_page == "search":
+            return "若当前搜索入口不可见，可先回到主界面后再尝试打开搜索"
+        return "若首选路径不可行，可回到安全状态后再通过搜索或稳定入口重试"
