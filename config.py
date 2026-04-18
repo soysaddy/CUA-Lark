@@ -19,7 +19,7 @@ class LarkWindowConfig:
 
 @dataclass
 class Config:
-    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "sk-W7YTOovYFrZ4kGEfx4n61Hn5loQhbOgVVkZ0t4DOrkv8"))
+    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "sk-W7YTOovYFrZ4kGEx4n615loQhbOgVVkZ0t4DOrkv8"))
     openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", "https://yunwu.ai/v1").rstrip("/"))
     openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))
     planner_model: str = field(default_factory=lambda: os.getenv("OPENAI_PLANNER_MODEL", "gpt-5.4-mini"))
